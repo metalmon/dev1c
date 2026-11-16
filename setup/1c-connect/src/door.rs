@@ -81,6 +81,9 @@ pub enum Ask {
     /// получают отказ словами (`enroll::Requests::answer`, обзор безопасности 16.11).
     Answer {
         fingerprint: String,
+        /// Имя карточки, если человек его назвал: одна сторона законно стучится в несколько карточек, и отпечаток их не различает
+        /// вовсе. `None` — карточка не названа, и тогда заявка обязана найтись по отпечатку одна.
+        card: Option<String>,
         decision: crate::enroll::Decision,
     },
 }
@@ -271,7 +274,7 @@ pub fn serves(kit: Kit, peer: crate::peer::Peer, codes: crate::codes::Codes, req
         Ask::Code { card } => Answer::Code(issue_for(&kit, &peer, &codes, card.as_deref())),
         Ask::Dial { code, card } => Answer::Dialled(dial_for(&kit, &peer, &code, card.as_deref())),
         Ask::Requests => Answer::Requests(Ok(waiting_now(&requests))),
-        Ask::Answer { fingerprint, decision } => Answer::Done(answer_for(&requests, &codes, &fingerprint, decision)),
+        Ask::Answer { fingerprint, card, decision } => Answer::Done(answer_for(&requests, &codes, &fingerprint, card.as_deref(), decision)),
     })
 }
 
@@ -309,9 +312,10 @@ pub fn answer_for(
     requests: &crate::enroll::Requests,
     codes: &crate::codes::Codes,
     fingerprint: &str,
+    card: Option<&str>,
     d: crate::enroll::Decision,
 ) -> Result<String, String> {
-    let done = requests.answer(fingerprint, d).map_err(str::to_string)?;
+    let done = requests.answer(fingerprint, card, d).map_err(str::to_string)?;
     if done.sent && d == crate::enroll::Decision::Allow {
         codes.forget(&done.card);
     }
@@ -343,7 +347,10 @@ pub fn request_lines(v: &[RequestView]) -> Vec<String> {
         out.push(String::new());
         out.push(format!("  «{}» · {} · осталось {} мин", r.card, r.says_name, r.left.as_secs().div_ceil(60)));
         out.push(format!("  сверить голосом: {}", r.short));
-        out.push(format!("  ответить: 1c-connect allow {}", r.fingerprint));
+        // Имя карточки — в готовой строке ВСЕГДА, а не когда «понадобится»: ключ заявки это пара (отпечаток, карточка), и одна
+        // сторона законно просит разрешения сразу по нескольким. Печатай строку без имени — человек получал бы отказ «их
+        // несколько» ровно в том случае, ради которого список и читают.
+        out.push(format!("  ответить: 1c-connect allow {} \"{}\"", r.fingerprint, r.card));
         out.push("            (или decline вместо allow)".into());
     }
     out
@@ -381,7 +388,11 @@ fn dial_for(kit: &Kit, peer: &crate::peer::Peer, code: &str, card: Option<&str>)
 /// Слова берутся у ЗАЧИСЛЕНИЯ и нигде не сочиняются: отказ уже произнесён той стороной (`Refuse::text`), и второй словарь исходов — ровно то, против чего эта ветка и воюет. Своё здесь одно — имя карточки впереди, тем же видом, каким о ней говорит журнал окна.
 pub fn dialled_words(card: &str, o: &crate::enroll::Outcome) -> Result<String, String> {
     match o {
-        crate::enroll::Outcome::Enrolled(base) => Ok(format!("«{card}»: подключено, {}", crate::peer::access_word(base.write))),
+        // Обе пары говорят человеку одно и то же: подключено, и вот с каким доступом. Разница между ними — чья база, а это про
+        // устройство связи, а не про то, чем кончился звонок.
+        crate::enroll::Outcome::Enrolled(base) | crate::enroll::Outcome::EnrolledHere(base) => {
+            Ok(format!("«{card}»: подключено, {}", crate::peer::access_word(base.write)))
+        }
         crate::enroll::Outcome::Already(base) => Ok(format!("«{card}»: подключено, {}", crate::peer::access_word(base.write))),
         crate::enroll::Outcome::NotEnrolled(no) => Err(format!("«{card}»: {}", no.text)),
     }
@@ -1127,7 +1138,9 @@ mod tests {
         let (requests, codes) = (requests.clone(), codes.clone());
         Arc::new(move |q| match q {
             Ask::Requests => Answer::Requests(Ok(waiting_now(&requests))),
-            Ask::Answer { fingerprint, decision } => Answer::Done(answer_for(&requests, &codes, &fingerprint, decision)),
+            Ask::Answer { fingerprint, card, decision } => {
+                Answer::Done(answer_for(&requests, &codes, &fingerprint, card.as_deref(), decision))
+            }
             other => panic!("этот исполнитель отвечает только про заявки: {other:?}"),
         })
     }
@@ -1151,12 +1164,12 @@ mod tests {
         door.answers(answers_requests(&requests, &codes));
         let fp = crate::enroll::short_key(&a_key(3).to_string());
 
-        let allowed = ask_at(&name, Ask::Answer { fingerprint: fp.clone(), decision: crate::enroll::Decision::Allow });
+        let allowed = ask_at(&name, Ask::Answer { fingerprint: fp.clone(), card: None, decision: crate::enroll::Decision::Allow });
         let Ok(Answer::Done(Ok(said))) = allowed else { panic!("первый ответ обязан уехать: {allowed:?}") };
         assert!(said.contains("разрешено"), "человеку сказано, чем кончилось: {said}");
         assert_eq!(rx.try_recv().expect("решение уехало в разговор"), crate::enroll::Decision::Allow);
 
-        let again = ask_at(&name, Ask::Answer { fingerprint: fp, decision: crate::enroll::Decision::Deny });
+        let again = ask_at(&name, Ask::Answer { fingerprint: fp, card: None, decision: crate::enroll::Decision::Deny });
         let Ok(Answer::Done(Err(no))) = again else { panic!("второй ответ обязан быть отказом: {again:?}") };
         assert!(no.contains("не удалось") && no.contains("Ромашка"), "отказ — словами и про ту карточку: {no}");
     }
@@ -1181,20 +1194,61 @@ mod tests {
         requests.take(two);
         door.answers(answers_requests(&requests, &codes));
 
-        let miss = ask_at(&name, Ask::Answer { fingerprint: "…нетакой".into(), decision: crate::enroll::Decision::Allow });
+        let miss = ask_at(&name, Ask::Answer { fingerprint: "…нетакой".into(), card: None, decision: crate::enroll::Decision::Allow });
         let Ok(Answer::Done(Err(no))) = miss else { panic!("отпечаток ничей — отказ: {miss:?}") };
         assert_eq!(no, crate::enroll::NO_SUCH_REQUEST);
 
         // Пустой отпечаток не называет НИКОГО, хотя хвостом подошёл бы всем: «ответить всем сразу» этой дверью не набирается.
-        let empty = ask_at(&name, Ask::Answer { fingerprint: "…".into(), decision: crate::enroll::Decision::Allow });
+        let empty = ask_at(&name, Ask::Answer { fingerprint: "…".into(), card: None, decision: crate::enroll::Decision::Allow });
         let Ok(Answer::Done(Err(no))) = empty else { panic!("пустой отпечаток — отказ: {empty:?}") };
         assert_eq!(no, crate::enroll::NO_SUCH_REQUEST);
 
-        // Один отпечаток — две заявки: выбрать за человека нельзя, он сверял голосом одну из них.
+        // Один отпечаток — две заявки: выбрать за человека нельзя, он сверял голосом одну из них. И ПОЛНЫЙ ключ их не различает
+        // тоже: сторона одна, разные у них карточки.
         let fp = crate::enroll::short_key(&a_key(3).to_string());
-        let both = ask_at(&name, Ask::Answer { fingerprint: fp, decision: crate::enroll::Decision::Allow });
+        let both = ask_at(&name, Ask::Answer { fingerprint: fp, card: None, decision: crate::enroll::Decision::Allow });
         let Ok(Answer::Done(Err(no))) = both else { panic!("два совпадения — отказ: {both:?}") };
         assert_eq!(no, crate::enroll::AMBIGUOUS_FINGERPRINT);
+        let whole = ask_at(&name, Ask::Answer { fingerprint: a_key(3).to_string(), card: None, decision: crate::enroll::Decision::Allow });
+        let Ok(Answer::Done(Err(no))) = whole else { panic!("полный ключ тут тоже не различает: {whole:?}") };
+        assert_eq!(no, crate::enroll::AMBIGUOUS_FINGERPRINT, "отказ зовёт назвать карточку — и это второе слово ключа заявки");
+    }
+
+    /// **Ключ заявки — ПАРА (отпечаток, карточка), и без второй половины командная строка не умела бы того, что умеет окно** (закон 3
+    /// спеки, круг правок задачи 7).
+    ///
+    /// Случай обычный, а не выдуманный: к одному партнёру держат по карточке на базу, и он просит разрешения сразу по нескольким.
+    /// Отпечаток у таких заявок один — и полный тоже, он у стороны один на все её заявки. Отсюда и вторая половина: имя карточки,
+    /// то самое, что человек видит в списке. Отними её — и единственным ответом остался бы отказ «их несколько», то есть из
+    /// командной строки такие заявки были бы неотвечаемы вовсе.
+    #[test]
+    fn one_side_asking_for_two_cards_is_answered_by_naming_the_card() {
+        let (_dir, kit) = kit_for_test();
+        let name = test_door("two-cards");
+        let door = open_at(&name, &kit).expect("дверь открылась");
+        let (requests, codes) = (crate::enroll::Requests::default(), crate::codes::Codes::default());
+        let (one, mut one_rx) = a_request("Ромашка", a_key(3), "Заказчик");
+        let (two, mut two_rx) = a_request("Клевер", a_key(3), "Заказчик");
+        requests.take(one);
+        requests.take(two);
+        door.answers(answers_requests(&requests, &codes));
+
+        let fp = a_key(3).to_string();
+        let asked = Ask::Answer { fingerprint: fp.clone(), card: Some("Клевер".into()), decision: crate::enroll::Decision::Allow };
+        let Ok(Answer::Done(Ok(said))) = ask_at(&name, asked) else {
+            panic!("названная карточка различает заявки")
+        };
+        assert!(said.contains("Клевер") && said.contains("разрешено"), "{said}");
+        assert_eq!(two_rx.try_recv().expect("решение уехало в ту заявку, которую назвали"), crate::enroll::Decision::Allow);
+        assert!(
+            matches!(one_rx.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)),
+            "соседняя карточки той же стороны разрешения не получила"
+        );
+
+        // А имя карточки, которой у этой стороны нет, не называет никого — и это опечатка, а не двусмысленность.
+        let asked = Ask::Answer { fingerprint: fp, card: Some("Пижма".into()), decision: crate::enroll::Decision::Allow };
+        let Ok(Answer::Done(Err(no))) = ask_at(&name, asked) else { panic!("чужая карточка — отказ") };
+        assert_eq!(no, crate::enroll::NO_SUCH_REQUEST);
     }
 
     /// `requests` печатает ровно то, что названо в спеке шагом четвёртым: карточка, отпечаток той стороны, как она себя назвала и
@@ -1225,7 +1279,7 @@ mod tests {
         );
 
         let fp = list[0].fingerprint.clone();
-        let answered = ask_at(&name, Ask::Answer { fingerprint: fp, decision: crate::enroll::Decision::Deny });
+        let answered = ask_at(&name, Ask::Answer { fingerprint: fp, card: None, decision: crate::enroll::Decision::Deny });
         assert!(matches!(answered, Ok(Answer::Done(Ok(_)))), "{answered:?}");
         let Ok(Answer::Requests(Ok(after))) = ask_at(&name, Ask::Requests) else { panic!("список обязан доехать") };
         assert!(after.is_empty(), "отвеченная заявка живой не показывается: {after:?}");
@@ -1334,7 +1388,8 @@ mod tests {
         assert_eq!(seen.short.chars().count(), 5, "короткий отпечаток — тот самый вид, что сверяют голосом: {seen:?}");
         assert!(seen.fingerprint.len() > seen.short.len(), "а отвечают полным ключом: {seen:?}");
 
-        let answered = ask_at(&accepting.name, Ask::Answer { fingerprint: seen.fingerprint, decision: crate::enroll::Decision::Allow });
+        let answered =
+            ask_at(&accepting.name, Ask::Answer { fingerprint: seen.fingerprint, card: None, decision: crate::enroll::Decision::Allow });
         let Ok(Answer::Done(Ok(said))) = answered else { panic!("ответ человека обязан уехать: {answered:?}") };
         assert!(said.contains("разрешено"), "{said}");
 
@@ -1352,35 +1407,33 @@ mod tests {
         let base = a_stand("pair-a-base", "accept", true);
         let agents = a_stand("pair-a-agents", "dial", false);
         let outcome = the_circle(&base, &agents);
+        // Исход пары A — `Enrolled`: база у ТОЙ стороны, и её поля приехали в `enroll_ok`. Разойдись ветки — красным станет этот
+        // тест или соседний, но не оба сразу.
         assert!(matches!(outcome, crate::enroll::Outcome::Enrolled(_)), "круг замкнулся зачислением, а не отказом: {outcome:?}");
         assert!(dialled_words("Ромашка", &outcome).expect("зачисление — успех").contains("подключено"));
     }
 
-    /// **Пара B тем же кругом — и она его НЕ проходит.** Красный тест, а не забытый: это вопрос ведущему, и пока на него нет ответа,
-    /// тест отложен, чтобы не красить ворота всей ветки.
+    /// **Пара B тем же кругом: сторона с базой звонит, сторона с агентами разрешает.**
     ///
-    /// Что замерено (16.11, этот самый круг на двух настоящих узлах). Сторона с агентами принимает заявку, человек её разрешает,
-    /// зачисление на принимающей стороне СОСТОЯЛОСЬ — и ровно так и должно быть: в паре B принимающая сторона базы не имеет, и
-    /// `accept_side` шлёт `enroll_ok` БЕЗ полей базы нарочно (см. его ветку `Side::WithBase`, и тест
-    /// `enroll::tests`, где ровно это и проверяется строкой «в паре B нашей базы в ответе нет вовсе»).
+    /// Этот круг и нашёл то, чего не нашли ни тесты, ни три ревью (замер 16.11): заявка доходила, человек её разрешал, зачисление
+    /// на принимающей стороне состоялось — а зовущая половина читала `enroll_ok` без полей базы как беду чужого комплекта
+    /// («Обновите комплект на нём и подключитесь заново»). Присылать его без полей базы принимающая сторона в паре B обязана —
+    /// базы у неё нет; не знала об этом зовущая. Починено разбором по паре (`enroll::dial_side`, `cfg::Pair::of_caller`).
     ///
-    /// А зовущая половина такого ответа не знает: `dial_side` разбирает `enroll_ok { base: None }` как беду чужого комплекта
-    /// (`NO_BASE_IN_OK` — «Обновите комплект на нём и подключитесь заново»), не спрашивая, какой стороной назвалась сама. Человек с
-    /// базой, позвонивший в паре B, прочтёт совет чинить исправную машину там, где подключение уже разрешено.
-    ///
-    /// Почему не починено здесь. Полей базы зовущей стороне в паре B и правда взять неоткуда — они её собственные, и подставить их
-    /// легко; но из `base_id` той стороны зовущая узнаёт ещё и ключ, которым та назовёт карточку при ВОЗВРАТЕ и при отзыве
-    /// (`peer::answering` → `Cards::mine_named`, `Call::Return`). Чем он должен быть в паре B — решение владельца, а не моё
-    /// (решение 8 брифа задачи 7: «останови работу и спроси»). Задача 7 эту границу только нашла.
+    /// Пара A тем же кругом идёт соседним тестом: разойдись эти две ветки — и красным станет ровно одна.
     #[test]
-    #[ignore = "красный вопрос ведущему: зовущая половина пары B не умеет enroll_ok без полей базы — см. докстроку"]
     fn pair_b_completes_without_a_window_and_without_a_second_machine() {
         // Сторона с АГЕНТАМИ принимает и разрешает; базы у неё нет (`Combo::AcceptBaseThere`). Сторона с БАЗОЙ звонит сама
         // (`Combo::DialBaseHere`) — это и есть пара B.
         let agents = a_stand("pair-b-agents", "accept", false);
         let base = a_stand("pair-b-base", "dial", true);
         let outcome = the_circle(&agents, &base);
-        assert!(matches!(outcome, crate::enroll::Outcome::Enrolled(_)), "круг замкнулся зачислением, а не отказом: {outcome:?}");
+        // Исход пары B — `EnrolledHere`: база НАША, полей той стороны в ответе нет и быть не может. Прими здесь `Enrolled` — и
+        // тест перестал бы отличать пару B от пары A, то есть сторожил бы не то, ради чего заведён.
+        let crate::enroll::Outcome::EnrolledHere(ours) = &outcome else {
+            panic!("круг замкнулся зачислением В НАШУ базу, а не отказом и не чужой базой: {outcome:?}")
+        };
+        assert_eq!(ours.base_name.as_str(), "Бухгалтерия.1CD", "поля базы — наши собственные, те самые, что мы объявили");
         assert!(dialled_words("Ромашка", &outcome).expect("зачисление — успех").contains("подключено"));
     }
 
@@ -1406,7 +1459,7 @@ mod tests {
             panic!("отказ обязан приехать видом списка заявок, а не пустым списком")
         };
         assert_eq!(why, crate::peer::NOT_READY);
-        let answer = Ask::Answer { fingerprint: "…1234".into(), decision: crate::enroll::Decision::Allow };
+        let answer = Ask::Answer { fingerprint: "…1234".into(), card: None, decision: crate::enroll::Decision::Allow };
         let Ok(Answer::Done(Err(why))) = ask_at(&name, answer) else {
             panic!("отказ обязан приехать видом ответа на заявку")
         };

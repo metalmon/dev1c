@@ -1219,11 +1219,28 @@ impl Pair {
             return Err(no);
         }
         Ok(match mine {
-            Combo::AcceptBaseHere | Combo::DialBaseThere => Pair::A,
-            Combo::AcceptBaseThere | Combo::DialBaseHere => Pair::B,
+            // Звонили не мы — значит пару называет ТА сторона, своим объявлением.
+            Combo::AcceptBaseHere | Combo::AcceptBaseThere => Pair::of_caller(theirs),
+            Combo::DialBaseHere | Combo::DialBaseThere => Pair::of_caller(my_side),
             // Сюда не дойти: у `Alone` нет стороны, и `?` выше уже вернул отказ.
             Combo::Alone => return Err(Mismatch::Alone),
         })
+    }
+
+    /// Пара по одному объявлению — ЗВОНЯЩЕЙ стороны, и это вся таблица: пару различает ровно то, у кого из двоих база, а кто из
+    /// двоих позвонил. Второе здесь известно по построению (речь о звонящем), остаётся первое.
+    ///
+    /// **Таблица живёт ЗДЕСЬ одна, и `of` выше читает её же.** Выражений у неё два быть не может: разойдясь, они назвали бы одно и
+    /// то же соединение разными парами с разных концов — а по паре решается, бывают ли в ответе поля базы (`enroll::dial_side`).
+    ///
+    /// Законность сочетания сторон здесь не проверяется и не нужна: её проверяет принимающая до первого ответа
+    /// (`Mismatch::of_sides`), и до разбора исхода незаконная пара попросту не доживает.
+    pub fn of_caller(caller: crate::wire::Side) -> Pair {
+        match caller {
+            // Позвонил тот, у кого база, — второй случай спеки.
+            crate::wire::Side::WithBase => Pair::B,
+            crate::wire::Side::WithAgents => Pair::A,
+        }
     }
 }
 
@@ -2967,6 +2984,17 @@ mod tests {
         // У каждого несовпадения свои слова, и они не пустые.
         for no in [Mismatch::BothHaveBase, Mismatch::NeitherHasBase, Mismatch::Alone] {
             assert!(no.text().len() > 20, "{no:?}: отказ говорится словами");
+        }
+        // **Таблица ОДНА, и короткий вход читает её же.** `of_caller` спрашивает зовущая половина зачисления (`enroll::dial_side`),
+        // чтобы узнать, бывают ли в ответе поля базы; разойдись она с `of` — одно и то же соединение называлось бы разными парами с
+        // разных концов, и зовущая читала бы законный ответ как беду чужого комплекта. Ровно это и стоило круга пары B.
+        for (caller, legal_partner) in [(WithBase, WithAgents), (WithAgents, WithBase)] {
+            let mine = if caller == WithBase { Combo::DialBaseHere } else { Combo::DialBaseThere };
+            assert_eq!(Ok(Pair::of_caller(caller)), Pair::of(mine, legal_partner), "короткий вход и полный читают одну таблицу");
+        }
+        // И с другого конца: принимающая сторона называет ту же пару, что назвала бы звонящая своим объявлением.
+        for (mine, theirs) in [(Combo::AcceptBaseHere, WithAgents), (Combo::AcceptBaseThere, WithBase)] {
+            assert_eq!(Pair::of(mine, theirs), Ok(Pair::of_caller(theirs)), "пару называет тот, кто позвонил");
         }
     }
 

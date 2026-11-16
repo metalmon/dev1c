@@ -1028,7 +1028,7 @@ mod tests {
                     )
                     .await
                     {
-                        Ok(Outcome::Enrolled(_)) | Ok(Outcome::Already(_)) => {
+                        Ok(Outcome::Enrolled(_) | Outcome::EnrolledHere(_) | Outcome::Already(_)) => {
                             enrolled.store(true, Ordering::SeqCst);
                             Round::Held(hold(control.ear(), |_| {}).await)
                         }
@@ -1119,7 +1119,9 @@ mod tests {
                     )
                     .await
                     {
-                        Ok(Outcome::Enrolled(_)) | Ok(Outcome::Already(_)) => Round::Held(hold(control.ear(), |_| {}).await),
+                        Ok(Outcome::Enrolled(_) | Outcome::EnrolledHere(_) | Outcome::Already(_)) => {
+                            Round::Held(hold(control.ear(), |_| {}).await)
+                        }
                         Ok(Outcome::NotEnrolled(no)) => Round::NotEnrolled(no),
                         Err(why) => Round::Failed(why),
                     }

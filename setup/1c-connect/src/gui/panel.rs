@@ -1729,7 +1729,10 @@ fn dial_card(ui: &mut Ui, card: &str, code: &str) {
         gui::note_line(
             ui,
             Line {
-                kind: Kind::Fail, text: "Программа ещё не готова подключаться — попробуйте через минуту.".into()
+                // Слова — общая константа (`peer::NOT_READY`), а не свой литерал: случай тот же самый, в который попадает и набранная
+                // команда, стукнувшая в дверь до подъёма узла, и читать человек обязан одно и то же, какой бы рукой он ни попросил.
+                kind: Kind::Fail,
+                text: crate::peer::NOT_READY.into(),
             },
         );
         return;
@@ -4688,12 +4691,12 @@ mod tests {
     }
     use super::{
         accepting_block, adopt_needed, adopt_topology, axis_of, axis_plan, base_here_answers, can_save, card, delete_on_confirm,
-        delete_question_text, dialling_block, enroll_facts, fact_rows, fields_differ, folder_label, found_text, issue_code, leave_question,
-        link_menu, live_code, main_button, nothing_to_show, op_question, pick_face, profile_label, project_facts, project_menu,
-        project_rows, publication_switch_label, reason, request_to_answer, resolve_selected, row_marks, save_hint, shown_base_url,
-        shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts, tools_actions, tools_subject, undecryptable_line,
-        window_radius, Body, DeleteOnConfirm, Dirty, LinkAct, ProjectMenu, BOOK_UNREAD_NOTE, DELETE_CONFIRM_YES, GATE_WORD,
-        NOT_ACCEPTING_NOTE, OFF_WORD, ONBOARDING_ASK, ROLE_UNKNOWN_NOTE,
+        delete_question_text, dial_card, dialling_block, enroll_facts, fact_rows, fields_differ, folder_label, found_text, issue_code,
+        leave_question, link_menu, live_code, main_button, nothing_to_show, op_question, pick_face, profile_label, project_facts,
+        project_menu, project_rows, publication_switch_label, reason, request_to_answer, resolve_selected, row_marks, save_hint,
+        shown_base_url, shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts, tools_actions, tools_subject,
+        undecryptable_line, window_radius, Body, DeleteOnConfirm, Dirty, LinkAct, ProjectMenu, BOOK_UNREAD_NOTE, DELETE_CONFIRM_YES,
+        GATE_WORD, NOT_ACCEPTING_NOTE, OFF_WORD, ONBOARDING_ASK, ROLE_UNKNOWN_NOTE,
     };
     use crate::cfg::{cfg_with, Connection};
     use crate::editors;
@@ -5806,6 +5809,24 @@ mod tests {
         ui.link = if up { State::Up { since: Instant::now() } } else { State::Off };
         ui.gate = None;
         ui
+    }
+
+    /// **Окно и командная строка говорят про неподнявшийся узел ОДНО** (находка ревью круга 1, Major 2).
+    ///
+    /// Случай один: человек просит связи раньше, чем узел вышел на провод. Рук у просьбы две — щелчок «Подключиться» здесь и стук
+    /// набранной команды в управляющую дверь (`door::reply`, пока не поставлен исполнитель), — и обе обязаны ответить одними словами.
+    ///
+    /// Сторожит это ВОТ ЭТОТ тест, а не сверка константы с константой: он гонит настоящий щелчок без узла и сверяет СТРОКУ ЖУРНАЛА с
+    /// общей константой. Прежде окно несло свой литерал, а докстрока `peer::NOT_READY` обещала общность — обещание было ложью, и
+    /// упасть на ней было нечему.
+    #[test]
+    fn the_window_says_not_ready_in_the_shared_words() {
+        let mut ui = ui_for("dial", "tunnel", false);
+        assert!(ui.peer.is_none(), "узла нет — это и есть проверяемая щель");
+        dial_card(&mut ui, "Ромашка", "кодик");
+        let said = &ui.log.last().expect("молча щелчок не кончается").line;
+        assert_eq!(said.text, crate::peer::NOT_READY, "слова окна и слова двери — одни");
+        assert_eq!(said.kind, Kind::Fail, "это отказ, а не сведение");
     }
 
     /// Решение владельца 10.11: кнопка не запирается и не прячется из-за незаполненного поля — она ведёт к нему. Слот пустеет только

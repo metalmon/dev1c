@@ -104,7 +104,7 @@ pub enum Answer {
 
 /// То, что о себе рассказывает живой экземпляр, и ТОЛЬКО это: обслуживает ли он сейчас и что со связью по карточкам. Ни одного поля про запас — задача 9 дополнит вид, когда `status` правда начнёт печатать больше; дополнять пустое дешевле, чем выпиливать лишнее.
 ///
-/// Чего здесь нет нарочно: всего, что `status` и так читает с диска (комплект, соединение, находки разбора, таблица фактов). Дверь нужна ровно для того, чего на диске НЕТ.
+/// Чего здесь нет нарочно: всего, что `status` и так читает с диска (соединение, находки разбора, таблица фактов). Дверь нужна ровно для того, чего на диске НЕТ, — и комплект, появившийся здесь кругом правок 3, не исключение: на диске лежит комплект СПРАШИВАЮЩЕГО, а узнать надо, какой обслуживает ЖИВОЙ.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusView {
     /// Поднято ли обслуживание вызовов агента прямо сейчас.
@@ -195,10 +195,14 @@ pub fn status_lines(v: &StatusView, mine: &Kit) -> Vec<String> {
     // прочесть: без этой строки всё сказанное ниже он отнёс бы к своему
     // комплекту, а оно про чужой. Слова общие с мостом (`ANOTHER_KIT`),
     // второго текста на тот же случай нет.
-    if let Some(k) = &v.kit {
-        if *k != kit_mark(mine) {
-            out.push(format!("  {ANOTHER_KIT}: {k}"));
-        }
+    match &v.kit {
+        Some(k) if *k == kit_mark(mine) => {}
+        // Та же мера и те же слова, что у `served_at`: молчать здесь нельзя
+        // ни в одном из двух случаев. Мост в этот самый миг пишет в журнал
+        // «чужой комплект» — и `status`, промолчав, оставил бы человека
+        // думать, что напечатанное ниже про его комплект.
+        Some(k) => out.push(format!("  {ANOTHER_KIT}: {k}")),
+        None => out.push(format!("  {ANOTHER_KIT} — какой именно, он не сообщает (похоже, он другой версии)")),
     }
     match &v.cards {
         None => out.push("  о состоянии связи он пока не сообщает".into()),
@@ -310,7 +314,7 @@ pub enum Served {
     No,
 }
 
-/// Обслуживает ли держатель двери прямо сейчас — признак, который до задачи 14 держался отдельным объектом ядра (`single_instance::acquire_serving` — мьютекс на Windows, `flock` каталога на Linux).
+/// Обслуживается ли ЭТОТ комплект — признак, который до задачи 14 держался отдельным объектом ядра (именованный мьютекс на Windows, `flock` каталога состояния на Linux).
 ///
 /// **Почему тот объект ушёл.** Он создавался БЕЗ префикса, то есть был виден только в своём сеансе, и единицу считал как «сеанс × учётка × комплект». На машине утреннего прогона окно поднимает задача планировщика — в своём сеансе; человек из своего сеанса спросил бы признак и получил «не обслуживает» при живом и работающем коннекторе: агенты выглядели бы выключенными, а сторож моста (`orphan::guard_owner`) увёл бы мост. Ровно та беда, которую задача чинила этажом выше, оставленная этажом ниже.
 ///
@@ -810,6 +814,36 @@ mod tests {
         assert_eq!(served_at(&test_door("other-kit-nobody"), &mine), Served::No, "двери нет — это «нет», а не чужой комплект");
     }
 
+    /// **Метка комплекта идёт за каталогом СОСТОЯНИЯ, а не за корнем** — и
+    /// сторож этот заведён нарочно (замечание ревью круга 3: прежний,
+    /// `the_serving_mark_lives_in_the_state_not_in_the_kit`, ушёл вместе со
+    /// своим предметом, а замены ему не было).
+    ///
+    /// Все прочие тесты строят комплект через `Kit::at`, где состояние и
+    /// есть корень, — подмену `kit.state()` на `kit.root` они не заметили бы
+    /// вовсе. На Linux состояние живёт отдельно от общего корня
+    /// (`ops_host::wire_state`), и два рабочих места на ОДНОМ комплекте
+    /// различаются именно им: слей их — и `mcp` одного рабочего места читал
+    /// бы живого соседа как своего.
+    #[test]
+    fn two_workstations_on_one_root_are_different_kits() {
+        let root = crate::project::tempdir::Dir::new();
+        let (one, two) = (crate::project::tempdir::Dir::new(), crate::project::tempdir::Dir::new());
+        let mine = Kit::with_state(root.path(), one.path());
+        let neighbour = Kit::with_state(root.path(), two.path());
+        assert_eq!(kit_mark(&mine), crate::holder::normal_path(one.path()), "метка — это состояние");
+        assert_ne!(kit_mark(&mine), crate::holder::normal_path(root.path()), "и никак не корень");
+
+        let name = test_door("one-root");
+        let door = open_at(&name, &mine).expect("дверь открылась");
+        door.show(StatusView { serving: true, cards: None, kit: None });
+        assert_eq!(served_at(&name, &mine), Served::Mine, "своё рабочее место — своё");
+        assert!(
+            matches!(served_at(&name, &neighbour), Served::Another(_)),
+            "сосед по корню — ДРУГОЙ комплект; возьми метку у корня, и два рабочих места слились бы в одно"
+        );
+    }
+
     /// Снимок несёт комплект, и кладёт его САМА дверь: что бы ни положил в
     /// это поле держатель, правда одна — тот комплект, по которому дверь
     /// открыли. Забыть или ошибиться держателю тем самым нечем.
@@ -1003,11 +1037,14 @@ mod tests {
     #[test]
     fn not_telling_and_nothing_connected_are_different_words() {
         let (_dir, kit) = kit_for_test();
-        let unknown = status_lines(&StatusView { serving: true, cards: None, kit: None }, &kit);
-        let none = status_lines(&StatusView { serving: true, cards: Some(vec![]), kit: None }, &kit);
+        // Комплект — СВОЙ: иначе первой же строкой встанет «обслуживает
+        // другой комплект», и тест смотрел бы не на то, ради чего заведён.
+        let mine = || Some(kit_mark(&kit));
+        let unknown = status_lines(&StatusView { serving: true, cards: None, kit: mine() }, &kit);
+        let none = status_lines(&StatusView { serving: true, cards: Some(vec![]), kit: mine() }, &kit);
         let one = status_lines(
             &StatusView {
-                serving: true, cards: Some(vec![CardState { name: "Ромашка".into(), word: "подключено".into() }]), kit: None
+                serving: true, cards: Some(vec![CardState { name: "Ромашка".into(), word: "подключено".into() }]), kit: mine()
             },
             &kit,
         );
@@ -1016,6 +1053,11 @@ mod tests {
         assert!(none[1].contains("не связана"), "{:?}", none);
         assert!(one[1].contains("Ромашка") && one[1].contains("подключено"), "{:?}", one);
         assert!(one[0].contains(crate::SUBJECT), "предмет назван общим словом: {:?}", one);
-        assert!(status_lines(&StatusView { serving: false, cards: None, kit: None }, &kit)[0].contains("выключен"));
+        assert!(status_lines(&StatusView { serving: false, cards: None, kit: mine() }, &kit)[0].contains("выключен"));
+        // А держатель, не сказавший комплекта, молчания не получает: у моста
+        // тот же случай — `Served::Another`, и две меры на один вопрос здесь
+        // были бы ровно той бедой, против которой вся ветка.
+        let silent = status_lines(&StatusView { serving: true, cards: Some(vec![]), kit: None }, &kit);
+        assert!(silent.iter().any(|l| l.contains(ANOTHER_KIT)), "о неназванном комплекте сказано словами: {silent:?}");
     }
 }

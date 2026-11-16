@@ -4,7 +4,7 @@
 //! из задачи-читателя в `mod.rs::handle`.
 
 use super::{
-    autostart, badge, confirm_database_change, confirm_database_change_with_text, confirm_switch_current_text, descriptor_changed,
+    badge, confirm_database_change, confirm_database_change_with_text, confirm_switch_current_text, descriptor_changed,
     ensure_publication_now, link, note_line, quit, republish_after_save, run_check, run_readiness, save_host, save_needs_confirm,
     save_tray_ceiling, save_tray_key, save_tray_keys, start_session, stop_session, switch_current, tab_for_unsaved_switch, theme,
     toggle_agent, toggle_link, window, Ev, Kind, Line, Tab, TrayState, Ui, TRAY_PNG,
@@ -1488,7 +1488,7 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
         MenuAction::Autostart => {
             let ui = cx.global::<Ui>();
             let Some(on) = ui.tray.as_ref().map(|t| t.autostart.is_checked()) else { return };
-            if let Err(e) = autostart::set(on) {
+            if let Err(e) = crate::autostart::set(on) {
                 if let Some(t) = &cx.global::<Ui>().tray {
                     t.autostart.set_checked(!on);
                 }

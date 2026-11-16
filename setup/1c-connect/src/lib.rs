@@ -5,6 +5,8 @@
 
 pub mod allow;
 pub mod analyzer;
+/// Автозапуск при входе в систему: реестр на Windows, файл `.desktop` иначе — без фичи `gui`, о нём спрашивают и его ставят без рабочего стола (задача 13 плана «Сопряжение переезжает в бек»).
+pub mod autostart;
 pub mod bridge;
 pub mod cfg;
 pub mod channel;

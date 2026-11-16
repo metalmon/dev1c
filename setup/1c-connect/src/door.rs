@@ -76,6 +76,9 @@ pub enum Ask {
     ///
     /// Адресуется ОТПЕЧАТКОМ той стороны, а не номером в списке: номер сдвигается между двумя набранными командами, а отпечаток не
     /// меняется — и по телефону голосом сверяют именно его (спека, раздел 5, пункт 5).
+    ///
+    /// Отпечаток принимается полный и сокращённый, но однозначен только полный: сокращение подбирается перебором, и совпавшие двое
+    /// получают отказ словами (`enroll::Requests::answer`, обзор безопасности 16.11).
     Answer {
         fingerprint: String,
         decision: crate::enroll::Decision,
@@ -131,8 +134,14 @@ pub enum Answer {
 pub struct RequestView {
     /// Имя карточки, к которой пришла заявка, — локальное, как его видит человек в списке.
     pub card: String,
-    /// Отпечаток той стороны — он же АДРЕС для `allow`/`decline` и то, что сверяют голосом.
+    /// Отпечаток той стороны ЦЕЛИКОМ — он же однозначный АДРЕС для `allow`/`decline`.
+    ///
+    /// Печатается он нарочно, хотя глазам длинен (обзор безопасности 16.11): коротким сокращением ответить однозначно НЕЛЬЗЯ — его
+    /// подбирают перебором за секунды, и две заявки с одинаковым хвостом получают отказ вместо ответа. Чем-то же отвечать человеку
+    /// надо, и это «что-то» обязано лежать у него перед глазами.
     pub fingerprint: String,
+    /// Тот же отпечаток коротким видом (`enroll::short_key`) — для ГОЛОСА: его и сверяют по телефону. Адресом он не является.
+    pub short: String,
     /// Как та сторона себя назвала — её слова, а не проверенный факт.
     pub says_name: String,
     /// Сколько осталось человеку на ответ (`enroll::DECISION` минус прошедшее).
@@ -276,11 +285,15 @@ pub fn waiting_now(requests: &crate::enroll::Requests) -> Vec<RequestView> {
         .lock()
         .iter()
         .filter(|p| p.reachable())
-        .map(|p| RequestView {
-            card: p.request.card_name.clone(),
-            fingerprint: crate::enroll::short_key(&p.request.peer.to_string()),
-            says_name: crate::enroll::who_says(&p.request.says_name),
-            left: p.left(),
+        .map(|p| {
+            let full = p.request.peer.to_string();
+            RequestView {
+                card: p.request.card_name.clone(),
+                short: crate::enroll::short_key(&full),
+                fingerprint: full,
+                says_name: crate::enroll::who_says(&p.request.says_name),
+                left: p.left(),
+            }
         })
         .collect()
 }
@@ -315,17 +328,24 @@ pub fn answer_for(
 /// Список заявок человеку — строками, и здесь, а не в `main.rs`: тот же довод, что у `status_lines`, — слова проверяет тест.
 ///
 /// Пустой список получает СЛОВА, а не пустоту: молчаливый ответ человек прочёл бы как «команда не сработала» (ограничение
-/// «молчаливого ответа не бывает»). Отпечаток стоит первым и своей колонкой — им же и отвечают, и его же сверяют голосом.
+/// «молчаливого ответа не бывает»).
+///
+/// **Отпечатка два, и у каждого своё дело** (обзор безопасности 16.11). Короткий — для ГОЛОСА: его называют по телефону, и четырёх
+/// знаков для «тот ли это, кого я жду» довольно. Полный — для ОТВЕТА: коротким ответить однозначно нельзя, он подбирается перебором
+/// за секунды, и две заявки с одинаковым хвостом получат отказ (`enroll::AMBIGUOUS_FINGERPRINT`). Поэтому готовая команда с полным
+/// ключом печатается строкой — человеку её копировать, а не переписывать глазами.
 pub fn request_lines(v: &[RequestView]) -> Vec<String> {
     if v.is_empty() {
         return vec!["Разрешения сейчас никто не просит.".into()];
     }
     let mut out = vec![format!("Просят разрешения подключиться ({}):", v.len())];
-    out.extend(
-        v.iter()
-            .map(|r| format!("  {:<8} {:<16} {:<24} осталось {} мин", r.fingerprint, r.card, r.says_name, r.left.as_secs().div_ceil(60))),
-    );
-    out.push("Ответить: 1c-connect allow ОТПЕЧАТОК — или decline ОТПЕЧАТОК.".into());
+    for r in v {
+        out.push(String::new());
+        out.push(format!("  «{}» · {} · осталось {} мин", r.card, r.says_name, r.left.as_secs().div_ceil(60)));
+        out.push(format!("  сверить голосом: {}", r.short));
+        out.push(format!("  ответить: 1c-connect allow {}", r.fingerprint));
+        out.push("            (или decline вместо allow)".into());
+    }
     out
 }
 
@@ -1141,8 +1161,12 @@ mod tests {
         assert!(no.contains("не удалось") && no.contains("Ромашка"), "отказ — словами и про ту карточку: {no}");
     }
 
-    /// Отказы адресации — РАЗНЫЕ слова на разные беды (решение ведущего): «такой заявки нет» про опечатку в отпечатке, «их две» про
-    /// то, что выбрать за человека нельзя. Смешай их — и человек, набравший отпечаток с ошибкой, искал бы вторую заявку, которой нет.
+    /// Отказы адресации — РАЗНЫЕ слова на разные беды (решение ведущего): «такой заявки нет» про опечатку или истёкший срок, «их
+    /// две» про то, что выбрать за человека нельзя. Смешай их — и человек, набравший отпечаток с ошибкой, искал бы вторую заявку,
+    /// которой нет.
+    ///
+    /// Двусмысленность здесь берётся не подобранным хвостом (это проверяет `enroll::tests::two_requests_whose_keys_end_alike…`), а
+    /// обычным живым случаем: ОДНА сторона стучится в ДВЕ карточки, и полный ключ у этих заявок один.
     #[test]
     fn a_fingerprint_that_names_nobody_and_one_that_names_two_are_different_words() {
         let (_dir, kit) = kit_for_test();
@@ -1188,12 +1212,17 @@ mod tests {
         let Ok(Answer::Requests(Ok(list))) = ask_at(&name, Ask::Requests) else { panic!("список обязан доехать") };
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].card, "Ромашка");
-        assert_eq!(list[0].fingerprint, crate::enroll::short_key(&a_key(3).to_string()), "отпечаток — тот же, что в окне");
+        assert_eq!(list[0].fingerprint, a_key(3).to_string(), "отвечают ПОЛНЫМ ключом — он однозначен, и он в списке");
+        assert_eq!(list[0].short, crate::enroll::short_key(&a_key(3).to_string()), "а голосом сверяют короткий — тот же, что в окне");
         assert_eq!(list[0].says_name, "«Заказчик»", "самоназвание — теми же словами, что в диалоге разрешения");
         assert!(list[0].left <= crate::enroll::DECISION && list[0].left > crate::enroll::DECISION - Duration::from_secs(60));
         let lines = request_lines(&list);
-        assert!(lines.iter().any(|l| l.contains(&list[0].fingerprint) && l.contains("Ромашка")), "{lines:?}");
-        assert!(lines.iter().any(|l| l.contains("allow")), "человеку сказано, чем отвечать: {lines:?}");
+        assert!(lines.iter().any(|l| l.contains("Ромашка")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains(&list[0].short)), "короткий отпечаток напечатан — его называют голосом: {lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("allow") && l.contains(&list[0].fingerprint)),
+            "а готовая строка ответа несёт ПОЛНЫЙ ключ: коротким однозначно не ответить — {lines:?}"
+        );
 
         let fp = list[0].fingerprint.clone();
         let answered = ask_at(&name, Ask::Answer { fingerprint: fp, decision: crate::enroll::Decision::Deny });

@@ -49,26 +49,27 @@ pub fn write(kit: &Kit, on: bool) -> anyhow::Result<()> {
 /// (`main.rs`, `gui/mod.rs`) — вопрос один, «обслуживает ли кто-то это
 /// рабочее место», и headless `serve` отвечает на него так же честно, как
 /// окно.
-fn connector_alive(kit: &Kit, user: &str) -> bool {
-    // Признак не прочитался (права, каталог не готов) — то же самое
-    // непонятное, что и чужое слово в файле: закрыто по умолчанию.
-    single_instance::is_serving(kit, user).unwrap_or(false)
+fn connector_alive(kit: &Kit) -> bool {
+    // Признак не прочитался (права, каталог не готов, учётная запись не
+    // узналась) — то же самое непонятное, что и чужое слово в файле: закрыто
+    // по умолчанию.
+    single_instance::is_serving(kit).unwrap_or(false)
 }
 
 /// Прочитать разрешение прямо сейчас: файл с диска плюс живость владельца, через `decide`.
-pub fn read(kit: &Kit, user: &str) -> bool {
+pub fn read(kit: &Kit) -> bool {
     let file = std::fs::read_to_string(path(kit)).ok();
-    decide(file.as_deref(), connector_alive(kit, user))
+    decide(file.as_deref(), connector_alive(kit))
 }
 
 /// Опрос файла раз в 200 мс в своём потоке — задачу забирает подкоманда `mcp`, которой нужен ответ на каждый `tools/call` без похода на диск и в реестр Windows синхронно с запросом редактора.
 /// ponytail: потолок — вызов, пришедший в эти 200 мс после выключения, ещё пройдёт; опрос чаще значило бы читать файл и держать признак обслуживания на каждый тик, а 200 мс и так короче, чем человек успевает заметить разницу между щелчком и отказом.
-pub fn watch(kit: &Kit, user: String) -> Arc<AtomicBool> {
+pub fn watch(kit: &Kit) -> Arc<AtomicBool> {
     let flag = Arc::new(AtomicBool::new(false));
     let out = flag.clone();
     let kit = kit.clone();
     std::thread::spawn(move || loop {
-        out.store(read(&kit, &user), Ordering::Relaxed);
+        out.store(read(&kit), Ordering::Relaxed);
         std::thread::sleep(std::time::Duration::from_millis(200));
     });
     flag
@@ -132,8 +133,8 @@ mod tests {
     /// тот же приём, что в `orphan.rs::tests::take_serving_for_test` (не
     /// общий, дублирован тем же порядком, что и `unique` выше — мелкие
     /// тестовые помощники в этом крейте не делят на несколько модулей).
-    fn take_serving_for_test(kit: &Kit, user: &str) -> single_instance::Guard {
-        single_instance::acquire_serving(kit, user).unwrap().expect("признак свободен в начале теста")
+    fn take_serving_for_test(kit: &Kit) -> single_instance::Guard {
+        single_instance::acquire_serving(kit).unwrap().expect("признак свободен в начале теста")
     }
 
     /// Важная находка ревью задачи 2: единственная строка, которая и есть
@@ -153,10 +154,9 @@ mod tests {
     #[test]
     fn read_follows_the_connector_not_just_the_file() {
         let kit = kit_in(tempdir());
-        let user = unique("read-user");
         write(&kit, true).unwrap();
-        let guard = take_serving_for_test(&kit, &user);
-        assert!(read(&kit, &user), "коннектор обслуживает комплект — файл «on» должен читаться как разрешение");
+        let guard = take_serving_for_test(&kit);
+        assert!(read(&kit), "коннектор обслуживает комплект — файл «on» должен читаться как разрешение");
         drop(guard);
         // Уход владельца проверяем смыслом, а не мгновенностью: контракт —
         // «ушёл коннектор, ушло и разрешение», а не «в ту же микросекунду».
@@ -167,7 +167,7 @@ mod tests {
         // одном прогоне из трёх, не найдя дефекта в продукте. Не ушло вовсе —
         // тест по-прежнему падает, только позже.
         let gone = (0..100).any(|_| {
-            if !read(&kit, &user) {
+            if !read(&kit) {
                 return true;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));

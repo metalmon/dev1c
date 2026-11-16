@@ -1687,8 +1687,8 @@ fn cmd_log_sink(kit: &Kit) -> Sink {
 /// Срок истёк — `enabled` гасится тем же тактом, что и признак разрешения:
 /// без этого процесс, поднятый редактором задолго до срока, продолжал бы
 /// отвечать `tools/call` и после него (ревью задачи 3, Important 4).
-fn mcp_tick(kit: &Kit, user: &str) -> (bool, Result<Cfg, String>) {
-    let allowed = crate::allow::read(kit, user);
+fn mcp_tick(kit: &Kit) -> (bool, Result<Cfg, String>) {
+    let allowed = crate::allow::read(kit);
     let licensed = !matches!(crate::licence::state_now(), crate::licence::State::Expired);
     (allowed && licensed, Cfg::load(kit).map_err(|e| e.to_string()))
 }
@@ -1744,7 +1744,7 @@ fn trusts_read_write(file_text: Option<&str>) -> bool {
     common::toml_render::get(text, "", "write").as_deref() == Some(crate::cfg::WriteCeiling::ReadWrite.as_str())
 }
 
-fn watch_mcp(kit: Kit, user: String, live: crate::session::Live, log: Sink) -> Arc<AtomicBool> {
+fn watch_mcp(kit: Kit, live: crate::session::Live, log: Sink) -> Arc<AtomicBool> {
     let flag = Arc::new(AtomicBool::new(false));
     let out = flag.clone();
     std::thread::spawn(move || {
@@ -1753,7 +1753,7 @@ fn watch_mcp(kit: Kit, user: String, live: crate::session::Live, log: Sink) -> A
         // ещё правит toml (тот же приём, что `bridge.rs::last_logged_error`).
         let mut last_parse_err: Option<String> = None;
         loop {
-            let (enabled, cfg) = mcp_tick(&kit, &user);
+            let (enabled, cfg) = mcp_tick(&kit);
             out.store(enabled, Ordering::Relaxed);
             match cfg {
                 Ok(cfg) => {
@@ -1850,8 +1850,8 @@ pub fn run_mcp(server: McpServer, kit: Kit) -> Result<()> {
     // не закрывает). Признак обслуживания, который он слушает, — за
     // комплектом, не за рабочим местом (круг исправления после ревью,
     // см. заголовок `orphan.rs`): `live` ему больше не нужна.
-    crate::orphan::guard_owner(kit.clone(), crate::single_instance::current_user(), log.clone());
-    let enabled = watch_mcp(kit.clone(), crate::single_instance::current_user(), live.clone(), log.clone());
+    crate::orphan::guard_owner(kit.clone(), log.clone());
+    let enabled = watch_mcp(kit.clone(), live.clone(), log.clone());
     // Порт подкоманде больше не нужен: вид сервера она знает прямо и отдаёт его словом (`session::Served`). `Ports` остаются — их
     // берёт сам `Serve`.
     let ports = cfg.ports();
@@ -3578,7 +3578,7 @@ mod tests {
     fn mcp_tick_is_closed_by_default_on_an_empty_kit() {
         let dir = mcp_test_dir("mcp-tick-empty");
         let kit = Kit::at(&dir);
-        let (enabled, cfg) = mcp_tick(&kit, "someone");
+        let (enabled, cfg) = mcp_tick(&kit);
         assert!(!enabled, "никто не обслуживает комплект — разрешения нет");
         assert!(cfg.is_ok(), "{cfg:?}");
         let _ = std::fs::remove_dir_all(&dir);
@@ -3587,8 +3587,8 @@ mod tests {
     /// То, чем на каждой платформе реально закреплён признак обслуживания —
     /// тот же приём, что в `orphan.rs`/`allow.rs` (не общий, дублирован тем
     /// же порядком, что и прочие мелкие тестовые помощники этого крейта).
-    fn take_serving_for_test(kit: &Kit, user: &str) -> crate::single_instance::Guard {
-        crate::single_instance::acquire_serving(kit, user).unwrap().expect("признак свободен в начале теста")
+    fn take_serving_for_test(kit: &Kit) -> crate::single_instance::Guard {
+        crate::single_instance::acquire_serving(kit).unwrap().expect("признак свободен в начале теста")
     }
 
     /// Тот же тик — `true`, когда признак на диске «on» и признак
@@ -3599,11 +3599,11 @@ mod tests {
         let dir = mcp_test_dir("mcp-tick-open");
         let kit = Kit::at(&dir);
         crate::allow::write(&kit, true).unwrap();
-        let guard = take_serving_for_test(&kit, "owner");
-        let (enabled, _) = mcp_tick(&kit, "owner");
+        let guard = take_serving_for_test(&kit);
+        let (enabled, _) = mcp_tick(&kit);
         assert!(enabled, "коннектор обслуживает комплект, признак «on» — разрешение должно быть");
         drop(guard);
-        let (enabled, _) = mcp_tick(&kit, "owner");
+        let (enabled, _) = mcp_tick(&kit);
         assert!(!enabled, "коннектор ушёл — тот же файл больше не разрешение");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3626,7 +3626,6 @@ mod tests {
     fn watch_mcp_keeps_the_previous_read_write_only_on_an_exact_match_from_a_broken_file() {
         let dir = mcp_test_dir("watch-mcp-write-ceiling");
         let kit = Kit::at(&dir);
-        let user = format!("owner-{}", std::process::id());
         let path = kit.state_path(crate::cfg::FILE);
         let store = crate::secrets::Store::file(kit.state());
         let write_cfg = |base_path: &str, write: &str| {
@@ -3639,10 +3638,10 @@ mod tests {
         };
         write_cfg("C:\\Bases\\Buh", "read_write");
         crate::allow::write(&kit, true).unwrap();
-        let _guard = take_serving_for_test(&kit, &user);
+        let _guard = take_serving_for_test(&kit);
         let live = crate::session::Live::new(Cfg::default());
         let log: Sink = Arc::new(|_| {});
-        let enabled = watch_mcp(kit.clone(), user, live.clone(), log);
+        let enabled = watch_mcp(kit.clone(), live.clone(), log);
         std::thread::sleep(std::time::Duration::from_millis(400));
         assert!(enabled.load(Ordering::Relaxed));
         assert_eq!(live.get().1.access(), "read_write", "файл годный — читается как есть");

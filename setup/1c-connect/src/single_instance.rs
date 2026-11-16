@@ -61,21 +61,6 @@
 
 use common::kit::Kit;
 
-/// Пользователь ОС: `USERNAME` на Windows, `USER` (резерв `LOGNAME`) на
-/// Linux. Не нашли — общий `?` на всех без логина в окружении: замок при
-/// этом не менее надёжен, просто не различил бы несколько таких учёток на
-/// одной машине (случай, которого на наших рабочих местах не бывает).
-///
-/// Ключ ЗАМКА из этого имени больше не строится (задача 14: замок считает
-/// учётную запись SID-ом и uid-ом, см. `account`) — здесь остался ключ
-/// признака обслуживания: подкоманде `1c-connect mcp` (`ops_host::run_mcp`)
-/// нужен тот же пользователь, которым признак закреплён, для `allow::watch`,
-/// а не свой второй способ узнать логин.
-pub(crate) fn current_user() -> String {
-    let found = if cfg!(windows) { std::env::var("USERNAME") } else { std::env::var("USER").or_else(|_| std::env::var("LOGNAME")) };
-    found.unwrap_or_else(|_| "?".into())
-}
-
 /// Без символов, опасных для имени объекта ядра или файла (пробелы,
 /// кириллица, `\`/`/`) — они гасятся в `_`. Чистят ею ПУТИ, и только их:
 /// ключ признака обслуживания (`serving_mutex_name`) и ключ файлового замка
@@ -83,7 +68,7 @@ pub(crate) fn current_user() -> String {
 /// теряет различия, и две разные учётные записи могли дать один ключ (см.
 /// `account`); у пути потери безобиднее, потому что путь к тому же моменту
 /// уже назван нами самими.
-pub(crate) fn clean(s: &str) -> String {
+fn clean(s: &str) -> String {
     s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect()
 }
 
@@ -109,16 +94,17 @@ pub(crate) fn clean(s: &str) -> String {
 /// Не узнали — это отказ, а не запасной ключ: замок с общим «не знаю» в
 /// ключе запирал бы разные учётные записи друг о друга, то есть делал бы
 /// ровно ту беду, против которой заведён.
+///
+/// **Спрашивается тем же, чем продукт уже отвечает на «чей это процесс»** —
+/// `holder::current_owner` (SID на Windows, десятичный uid из `/proc/<pid>`
+/// на Linux). Своего способа узнать себя здесь нет и быть не должно: им
+/// сверяют держателя порта (`publication`), им же дверь проверяет
+/// собеседника (`door::server_is_ours`), и третий ответ на тот же вопрос
+/// разошёлся бы с первыми двумя молча — ровно то, из-за чего эта задача и
+/// завелась.
 pub fn account() -> std::io::Result<String> {
-    #[cfg(windows)]
-    {
-        crate::door::my_sid()
-    }
-    // SAFETY: `getuid` ничего не принимает и не может отказать.
-    #[cfg(not(windows))]
-    {
-        Ok(unsafe { libc::getuid() }.to_string())
-    }
+    crate::holder::current_owner()
+        .ok_or_else(|| std::io::Error::other("не удалось узнать вашу учётную запись — замок и управляющая дверь без неё не заводятся"))
 }
 
 #[cfg(windows)]
@@ -142,7 +128,7 @@ unsafe impl Sync for Guard {}
 
 /// Общая часть приёма замка на Windows: `CreateMutexW` по готовому имени.
 /// Вынесена, чтобы её звали оба замка, различающиеся только тем, как
-/// построено имя — `acquire_serving` (пользователь и путь комплекта) и
+/// построено имя — `acquire_serving` (учётная запись и путь комплекта) и
 /// `project::file_lock` (ключ — сам путь, через `pub(crate) fn file_lock`
 /// ниже). Замок рабочего места сюда больше не ходит: он держится дверью
 /// (задача 14).
@@ -176,9 +162,17 @@ fn acquire_mutex(name: &str) -> std::io::Result<Option<Guard>> {
 }
 
 /// Имя мьютекса «этот процесс обслуживает данный комплект» — отдельный
-/// объект от замка рабочего места (та держится дверью, см. `acquire`), и
-/// нарочно: ключ — пользователь ОС и ПУТЬ комплекта (`lock_target`),
-/// рабочего места в нём нет вовсе.
+/// объект от замка рабочего места (тот держится дверью, см. `acquire`), и
+/// нарочно: ключ — учётная запись и ПУТЬ комплекта (`lock_target`), рабочего
+/// места в нём нет вовсе.
+///
+/// **Учётную запись сюда даёт тот же `account`, что и замку** (круг правок
+/// 1 задачи 14). Прежде здесь стоял `clean(USERNAME)` — то есть на вопрос
+/// «чья это копия» в одной задаче отвечали ДВА разных способа, точный у
+/// двери и приблизительный здесь, и расхождение между ними не показалось бы
+/// никому до первой учётной записи, чьё имя чистка теряет. Пути это не
+/// касается: он к этому моменту назван нами самими, и `clean` на нём — про
+/// имя объекта ядра, а не про учётную запись.
 ///
 /// Круг исправления после ревью: сторож по коннектору (`orphan::guard_owner`)
 /// сперва смотрел в тот же замок, что держит окно, — а ключ того замка нёс
@@ -196,8 +190,8 @@ fn acquire_mutex(name: &str) -> std::io::Result<Option<Guard>> {
 /// комплекта (`lock_target`) не меняется без перезапуска самого коннектора
 /// — вот и весь ключ.
 #[cfg(windows)]
-fn serving_mutex_name(user: &str, kit: &Kit) -> String {
-    format!("1c-connect-serving-{}-{}", clean(user), clean(&lock_target(kit).display().to_string()))
+fn serving_mutex_name(account: &str, kit: &Kit) -> String {
+    format!("1c-connect-serving-{account}-{}", clean(&lock_target(kit).display().to_string()))
 }
 
 /// Закрепить «этот процесс обслуживает данный комплект» — объектом ядра,
@@ -215,8 +209,8 @@ fn serving_mutex_name(user: &str, kit: &Kit) -> String {
 /// запрещать; вызывающий просто не держит признак, и сторож у НЕГО не
 /// заведётся на пользу (увидит `Owner::NotYet` и будет жить заглушкой).
 #[cfg(windows)]
-pub fn acquire_serving(kit: &Kit, user: &str) -> std::io::Result<Option<Guard>> {
-    acquire_mutex(&serving_mutex_name(user, kit))
+pub fn acquire_serving(kit: &Kit) -> std::io::Result<Option<Guard>> {
+    acquire_mutex(&serving_mutex_name(&account()?, kit))
 }
 
 /// Видит ли сторож коннектора (`orphan::guard_owner`), что комплект сейчас
@@ -227,12 +221,12 @@ pub fn acquire_serving(kit: &Kit, user: &str) -> std::io::Result<Option<Guard>> 
 /// вовсе, поэтому два читателя не заверяют живость друг друга, застав один
 /// тик другого (находка ревью задачи 2).
 #[cfg(windows)]
-pub fn is_serving(kit: &Kit, user: &str) -> std::io::Result<bool> {
+pub fn is_serving(kit: &Kit) -> std::io::Result<bool> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{CloseHandle, ERROR_FILE_NOT_FOUND};
     use windows_sys::Win32::System::Threading::{OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
-    let name = serving_mutex_name(user, kit);
+    let name = serving_mutex_name(&account()?, kit);
     let wide: Vec<u16> = OsStr::new(&name).encode_wide().chain(std::iter::once(0)).collect();
     // SAFETY: обычный вызов kernel32 с нуль-терминированной строкой, живущей на стеке этого вызова; `OpenMutexW` не создаёт объект и не берёт владение им — только открывает дескриптор на уже существующий, если такой есть.
     let h = unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, 0, wide.as_ptr()) };
@@ -325,7 +319,7 @@ fn acquire_flock(file: std::fs::File) -> std::io::Result<Option<Guard>> {
 /// вопрос «тот же ли это комплект у той же учётной записи» на обеих осях
 /// один.
 #[cfg(not(windows))]
-pub fn acquire_serving(kit: &Kit, _user: &str) -> std::io::Result<Option<Guard>> {
+pub fn acquire_serving(kit: &Kit) -> std::io::Result<Option<Guard>> {
     let lock_on = lock_target(kit);
     let file = std::fs::OpenOptions::new().read(true).open(&lock_on).map_err(|e| lock_error(&lock_on, e))?;
     acquire_flock(file)
@@ -378,7 +372,7 @@ fn held_with(lock_on: &std::path::Path, locks: Option<&str>) -> std::io::Result<
 /// только спрошенный у `flock`, который держит `acquire_serving`. `user` не
 /// участвует по той же причине, что и там: учётную запись несёт сам путь.
 #[cfg(not(windows))]
-pub fn is_serving(kit: &Kit, _user: &str) -> std::io::Result<bool> {
+pub fn is_serving(kit: &Kit) -> std::io::Result<bool> {
     held_with(&lock_target(kit), std::fs::read_to_string("/proc/locks").ok().as_deref())
 }
 
@@ -632,8 +626,11 @@ pub fn is_held(account: &str) -> bool {
 /// Взять признак обслуживания лучшим усилием, рядом с `acquire`
 /// (`main.rs::connect`/`serve`, `gui::launch`) — держать до конца процесса,
 /// переменная остаётся на стеке вызывающей функции. Пользователя не просит
-/// параметром (тем же приёмом, что `acquire` берёт `current_user()` сам): он
-/// `pub(crate)`, а `main.rs`/`gui::launch` — другой крейт (бинарь), не этот.
+/// Учётную запись параметром не просит — её знает `account`, и спрашивать
+/// её у зовущих значило бы заводить второй ответ на вопрос «чья это копия»
+/// (круг правок 1 задачи 14: строка пользователя ездила отсюда до
+/// `ops_host::run_mcp` и обратно, и ни одному из зовущих она не была нужна
+/// ни для чего другого).
 ///
 /// Неудача (тот же комплект уже обслуживает другой процесс этого
 /// пользователя под другим именем рабочего места — предсуществующий случай,
@@ -649,7 +646,7 @@ pub fn is_held(account: &str) -> bool {
 /// признак стало некому; теперь его берут здесь обе оси, и разница осталась
 /// только в примитиве (`acquire_serving`).
 pub fn hold_serving(kit: &Kit) -> Option<Guard> {
-    match acquire_serving(kit, &current_user()) {
+    match acquire_serving(kit) {
         Ok(g) => g,
         Err(e) => {
             eprintln!("признак «обслуживает этот комплект» не закрепился: {e} — сторож моста по коннектору не заведётся ему на пользу");
@@ -853,7 +850,7 @@ mod tests {
 
         assert!(!held_with(&dir, Some(&line)).unwrap(), "строка есть, замка нет — это не владелец");
 
-        let guard = acquire_serving(&Kit::at(&dir), "кто угодно").unwrap().expect("каталог свободен");
+        let guard = acquire_serving(&Kit::at(&dir)).unwrap().expect("каталог свободен");
         assert!(held_with(&dir, Some(&line)).unwrap(), "замок настоящий — та же строка подтверждается пробой");
         drop(guard);
         assert!(!held_with(&dir, Some(&line)).unwrap(), "замок ушёл — строка снова ничего не доказывает");
@@ -896,7 +893,7 @@ mod tests {
         // ponytail: в контейнере тесты иногда бегут от root — тогда права не
         // проверяются вовсе, и это не повод валить тест: просто ничего не
         // утверждаем про текст ошибки, раз её и не было.
-        if let Err(err) = acquire_serving(&Kit::at(&file), &unique("perm")) {
+        if let Err(err) = acquire_serving(&Kit::at(&file)) {
             let msg = err.to_string();
             assert!(msg.contains(&file.display().to_string()), "путь должен быть назван: {msg}");
         }
@@ -951,9 +948,8 @@ mod tests {
     fn the_serving_mark_of_one_kit_never_collides_with_another() {
         let a = existing_dir("kit-a");
         let b = existing_dir("kit-b");
-        let user = unique("serving");
-        let ga = acquire_serving(&Kit::at(&a), &user).unwrap().expect("первый комплект свободен");
-        let gb = acquire_serving(&Kit::at(&b), &user).unwrap();
+        let ga = acquire_serving(&Kit::at(&a)).unwrap().expect("первый комплект свободен");
+        let gb = acquire_serving(&Kit::at(&b)).unwrap();
         assert!(gb.is_some(), "признак другого комплекта не должен видеть признак первого");
         // Отпускаем ДО удаления каталогов: `flock` на удалённом каталоге
         // остаётся в `/proc/locks` со своим номером inode, а ядро отдаёт этот
@@ -964,6 +960,30 @@ mod tests {
         drop(gb);
         let _ = std::fs::remove_dir_all(&a);
         let _ = std::fs::remove_dir_all(&b);
+    }
+
+    /// **Признак обслуживания и замок отвечают на «чья это копия» ОДНИМ
+    /// ключом** (красный тест круга правок 1 задачи 14).
+    ///
+    /// До этого круга замок перешёл на `account` (SID/uid), а признак
+    /// остался на `clean(USERNAME)` — в одной задаче про единицу завелись
+    /// две меры, точная и приблизительная, и разошлись бы они молча, на
+    /// первой же учётной записи, чьё имя чистка теряет. Тест стоит на том,
+    /// что взявший и спрашивающий обязаны считать учётную запись одним и тем
+    /// же способом: разведи их — и `is_serving` перестанет видеть то, что
+    /// взял `hold_serving`, то есть сторож моста (`orphan::guard_owner`)
+    /// уведёт мост при живом коннекторе.
+    ///
+    /// Без `#[cfg]` и на обеих осях: ключ у примитивов разный (имя мьютекса
+    /// там, путь `flock` тут), а вопрос один.
+    #[test]
+    fn the_serving_mark_and_the_lock_count_the_account_the_same_way() {
+        let (_dir, kit) = kit_for_test();
+        assert!(!is_serving(&kit).unwrap(), "признак никто не брал");
+        let held = hold_serving(&kit).expect("признак свободен в начале теста");
+        assert!(is_serving(&kit).unwrap(), "взявший и спрашивающий обязаны считать учётную запись одним способом");
+        drop(held);
+        assert!(!is_serving(&kit).unwrap(), "признак отпущен — и видно это тем же ключом");
     }
 
     #[test]

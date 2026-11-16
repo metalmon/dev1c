@@ -194,8 +194,8 @@ pub fn owner_now(seen: bool, alive: bool) -> Owner {
 /// рабочего места: оно меняется на ходу («Сохранить» без перезапуска окна,
 /// `gui/save.rs`), а привязка сторожа обязана переживать это (круг
 /// исправления, см. заголовок модуля).
-fn owner_alive(kit: &common::kit::Kit, user: &str) -> std::io::Result<bool> {
-    crate::single_instance::is_serving(kit, user)
+fn owner_alive(kit: &common::kit::Kit) -> std::io::Result<bool> {
+    crate::single_instance::is_serving(kit)
 }
 
 /// Как часто спрашиваем признак. Секунда, как у опроса родителя на Linux:
@@ -210,7 +210,7 @@ const OWNER_TICK: std::time::Duration = std::time::Duration::from_secs(1);
 /// рабочего места, которого в привязке больше нет, — круг исправления): имя
 /// рабочего места может меняться у открытого окна сколько угодно, признак
 /// обслуживания комплекта от него не зависит.
-pub fn guard_owner(kit: common::kit::Kit, user: String, log: Sink) {
+pub fn guard_owner(kit: common::kit::Kit, log: Sink) {
     std::thread::spawn(move || {
         let mut seen = false;
         let mut said = false;
@@ -220,7 +220,7 @@ pub fn guard_owner(kit: common::kit::Kit, user: String, log: Sink) {
             // не «коннектора нет»: решение здесь — уходить или нет, и
             // неизвестность обязана значить «живём». Такт пропускаем целиком,
             // чтобы она не записалась и в «коннектор уже видели».
-            let Ok(alive) = owner_alive(&kit, &user) else { continue };
+            let Ok(alive) = owner_alive(&kit) else { continue };
             match owner_now(seen, alive) {
                 Owner::Alive => seen = true,
                 Owner::Gone => leaving(&log, "коннектор рабочего места закрылся"),
@@ -392,8 +392,8 @@ mod tests {
     /// здесь нет, разной осталась только опора под ним (мьютекс или `flock`,
     /// см. заголовок модуля). `user` на Linux в ключ не входит — учётную
     /// запись несёт сам путь, — а на Windows он часть имени признака.
-    fn take_serving_for_test(kit: &common::kit::Kit, user: &str) -> crate::single_instance::Guard {
-        crate::single_instance::acquire_serving(kit, user).unwrap().expect("признак свободен в начале теста")
+    fn take_serving_for_test(kit: &common::kit::Kit) -> crate::single_instance::Guard {
+        crate::single_instance::acquire_serving(kit).unwrap().expect("признак свободен в начале теста")
     }
 
     /// `owner_alive` обязана спрашивать ТОТ ЖЕ признак, что держит
@@ -407,11 +407,10 @@ mod tests {
     fn owner_alive_sees_the_same_marker_the_connector_takes() {
         let dir = crate::project::tempdir::Dir::new();
         let kit = common::kit::Kit::at(dir.path());
-        let user = crate::single_instance::current_user();
-        assert!(!owner_alive(&kit, &user).unwrap(), "признака обслуживания ещё нет");
-        let guard = take_serving_for_test(&kit, &user);
-        assert!(owner_alive(&kit, &user).unwrap(), "коннектор обслуживает комплект — сторож обязан это увидеть");
+        assert!(!owner_alive(&kit).unwrap(), "признака обслуживания ещё нет");
+        let guard = take_serving_for_test(&kit);
+        assert!(owner_alive(&kit).unwrap(), "коннектор обслуживает комплект — сторож обязан это увидеть");
         drop(guard);
-        assert!(!owner_alive(&kit, &user).unwrap(), "коннектор ушёл — признак снят вместе с ним");
+        assert!(!owner_alive(&kit).unwrap(), "коннектор ушёл — признак снят вместе с ним");
     }
 }

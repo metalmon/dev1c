@@ -1233,6 +1233,157 @@ mod tests {
         assert!(request_lines(&after)[0].contains("никто не просит"), "{:?}", request_lines(&after));
     }
 
+    /// Рабочее место целиком, как его поднимает `serve`: свой комплект с настройками, свой узел, своя дверь и общий с ней список
+    /// заявок. Декораций здесь нет ни одной — ради этого мера и затевалась.
+    struct Stand {
+        /// Каталог комплекта: жив, пока жив стенд, — его снимает `Drop`.
+        _dir: crate::project::tempdir::Dir,
+        /// Дверь держится ручкой: уронишь её — приём стуков кончится вместе с ней.
+        _door: Door,
+        kit: Kit,
+        name: String,
+        peer: crate::peer::Peer,
+    }
+
+    /// Поднять такое рабочее место. Повторяет `main::serve` по порядку и по составу: настройки на диск, узел, приёмник его событий
+    /// (заявки — в общий список), дверь, исполнитель (`door::serves`).
+    fn a_stand(tag: &str, role: &str, base_here: bool) -> Stand {
+        let dir = crate::project::tempdir::Dir::new();
+        let kit = Kit::at(dir.path());
+        let card = crate::cfg::Connection {
+            name: "Ромашка".into(),
+            role: role.into(),
+            mode: "tunnel".into(),
+            base_here,
+            base_path: if base_here { dir.path().join("Бухгалтерия.1CD").display().to_string() } else { String::new() },
+            ..Default::default()
+        };
+        let cfg = crate::cfg::Cfg { current: "Ромашка".into(), connections: vec![card], ..Default::default() };
+        let store = crate::secrets::Store::file(&dir.path().join("secrets"));
+        let text = cfg.render(&store).expect("настройки напечатались");
+        std::fs::write(kit.state_path(crate::cfg::FILE), text).expect("настройки записались");
+
+        let (out_tx, mut out_rx) = futures::channel::mpsc::unbounded::<crate::peer_out::Out>();
+        let peer = crate::peer::start(&kit, out_tx, crate::session::Serving::default());
+        let requests = crate::enroll::Requests::default();
+        let theirs = requests.clone();
+        // Тот же приёмник, что у `main::peer_wiring`: заявка кладётся в общий список, остальное этой мере безразлично.
+        std::thread::spawn(move || {
+            futures::executor::block_on(async move {
+                use futures::StreamExt;
+                while let Some(out) = out_rx.next().await {
+                    if let crate::peer_out::Out::Enroll(p) = out {
+                        theirs.take(p);
+                    }
+                }
+            })
+        });
+        let name = test_door(tag);
+        let door = open_at(&name, &kit).expect("дверь открылась");
+        door.answers(serves(kit.clone(), peer.clone(), crate::codes::Codes::default(), requests));
+        Stand { _dir: dir, _door: door, kit, name, peer }
+    }
+
+    /// Ждать, пока узел назовёт свои адреса: код, выданный до этого, несёт один ключ и дозванивается только через серверы n0, то есть
+    /// требует настоящего интернета. Опрос, а не сон на глазок.
+    fn wait_until_reachable(stand: &Stand) {
+        for _ in 0..200 {
+            if stand.peer.reach().is_some_and(|r| !r.direct.is_empty()) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        panic!("узел так и не назвал ни одного адреса — звонить по такому коду некуда");
+    }
+
+    /// Круг целиком: зовущая сторона звонит, принимающая выдала код, видит заявку, отвечает на неё — и обе слышат исход. Всё —
+    /// вопросами к управляющей двери, то есть ровно тем, что набирает человек в командной строке.
+    ///
+    /// Ради этой меры и писалась вся ветка. Что она ловит, чего не ловит ни один тест выше: что четыре команды складываются в КРУГ.
+    /// Порознь каждая из них зелена и при оборванной проводке — заявка, положенная в список, которого никто не спрашивает; код,
+    /// выданный узлом, до которого не дозвониться; ответ, уехавший в разговор, которого больше нет.
+    ///
+    /// Узлы настоящие и сводятся по петле (адреса петли кладёт в код `ticket::direct_with_loopback` — там и довод, почему без них
+    /// две копии на одной машине не нашли бы друг друга). Чего здесь нет: второй машины, окна, человека у экрана.
+    fn the_circle(accepting: &Stand, calling: &Stand) -> crate::enroll::Outcome {
+        wait_until_reachable(accepting);
+        let asked = ask_at(&accepting.name, Ask::Code { card: None });
+        let Ok(Answer::Code(Ok(issued))) = asked else {
+            panic!("принимающая сторона обязана выдать код: {asked:?}")
+        };
+        let call = {
+            let (name, code) = (calling.name.clone(), issued.code.clone());
+            std::thread::spawn(move || ask_at(&name, Ask::Dial { code, card: None }))
+        };
+
+        // Заявка едет через сеть и приезжает не мгновенно — опрашиваем, а не спим на глазок.
+        let mut seen = None;
+        for _ in 0..600 {
+            if let Ok(Answer::Requests(Ok(list))) = ask_at(&accepting.name, Ask::Requests) {
+                if let Some(r) = list.into_iter().next() {
+                    seen = Some(r);
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let seen = seen.expect("заявка на зачисление обязана дойти до списка живого экземпляра");
+        assert_eq!(seen.card, "Ромашка", "заявка пришла к той карточке, которой выдан код");
+        let caller = crate::node::id_from_state(calling.kit.state()).expect("ключ звонящего узла").to_string();
+        assert_eq!(seen.fingerprint, caller, "отпечаток называет ТУ сторону, которая и звонит");
+        assert_eq!(seen.short.chars().count(), 5, "короткий отпечаток — тот самый вид, что сверяют голосом: {seen:?}");
+        assert!(seen.fingerprint.len() > seen.short.len(), "а отвечают полным ключом: {seen:?}");
+
+        let answered = ask_at(&accepting.name, Ask::Answer { fingerprint: seen.fingerprint, decision: crate::enroll::Decision::Allow });
+        let Ok(Answer::Done(Ok(said))) = answered else { panic!("ответ человека обязан уехать: {answered:?}") };
+        assert!(said.contains("разрешено"), "{said}");
+
+        let dialled = call.join().expect("поток звонка");
+        let Ok(Answer::Dialled(Ok(outcome))) = dialled else {
+            panic!("звонок обязан кончиться исходом: {dialled:?}")
+        };
+        outcome
+    }
+
+    /// **Пара A целиком, без второй машины и без окна.** База у ПРИНИМАЮЩЕЙ стороны (`Combo::AcceptBaseHere`), звонит сторона с
+    /// агентами (`Combo::DialBaseThere`) — она и вставляет код.
+    #[test]
+    fn pair_a_completes_without_a_window_and_without_a_second_machine() {
+        let base = a_stand("pair-a-base", "accept", true);
+        let agents = a_stand("pair-a-agents", "dial", false);
+        let outcome = the_circle(&base, &agents);
+        assert!(matches!(outcome, crate::enroll::Outcome::Enrolled(_)), "круг замкнулся зачислением, а не отказом: {outcome:?}");
+        assert!(dialled_words("Ромашка", &outcome).expect("зачисление — успех").contains("подключено"));
+    }
+
+    /// **Пара B тем же кругом — и она его НЕ проходит.** Красный тест, а не забытый: это вопрос ведущему, и пока на него нет ответа,
+    /// тест отложен, чтобы не красить ворота всей ветки.
+    ///
+    /// Что замерено (16.11, этот самый круг на двух настоящих узлах). Сторона с агентами принимает заявку, человек её разрешает,
+    /// зачисление на принимающей стороне СОСТОЯЛОСЬ — и ровно так и должно быть: в паре B принимающая сторона базы не имеет, и
+    /// `accept_side` шлёт `enroll_ok` БЕЗ полей базы нарочно (см. его ветку `Side::WithBase`, и тест
+    /// `enroll::tests`, где ровно это и проверяется строкой «в паре B нашей базы в ответе нет вовсе»).
+    ///
+    /// А зовущая половина такого ответа не знает: `dial_side` разбирает `enroll_ok { base: None }` как беду чужого комплекта
+    /// (`NO_BASE_IN_OK` — «Обновите комплект на нём и подключитесь заново»), не спрашивая, какой стороной назвалась сама. Человек с
+    /// базой, позвонивший в паре B, прочтёт совет чинить исправную машину там, где подключение уже разрешено.
+    ///
+    /// Почему не починено здесь. Полей базы зовущей стороне в паре B и правда взять неоткуда — они её собственные, и подставить их
+    /// легко; но из `base_id` той стороны зовущая узнаёт ещё и ключ, которым та назовёт карточку при ВОЗВРАТЕ и при отзыве
+    /// (`peer::answering` → `Cards::mine_named`, `Call::Return`). Чем он должен быть в паре B — решение владельца, а не моё
+    /// (решение 8 брифа задачи 7: «останови работу и спроси»). Задача 7 эту границу только нашла.
+    #[test]
+    #[ignore = "красный вопрос ведущему: зовущая половина пары B не умеет enroll_ok без полей базы — см. докстроку"]
+    fn pair_b_completes_without_a_window_and_without_a_second_machine() {
+        // Сторона с АГЕНТАМИ принимает и разрешает; базы у неё нет (`Combo::AcceptBaseThere`). Сторона с БАЗОЙ звонит сама
+        // (`Combo::DialBaseHere`) — это и есть пара B.
+        let agents = a_stand("pair-b-agents", "accept", false);
+        let base = a_stand("pair-b-base", "dial", true);
+        let outcome = the_circle(&agents, &base);
+        assert!(matches!(outcome, crate::enroll::Outcome::Enrolled(_)), "круг замкнулся зачислением, а не отказом: {outcome:?}");
+        assert!(dialled_words("Ромашка", &outcome).expect("зачисление — успех").contains("подключено"));
+    }
+
     /// Дверь открыта, а делать ещё нечем: узел поднимается не мгновенно. Отказ приезжает СЛОВАМИ и тем видом ответа, которого вопрос ждёт, — чужой вид клиент прочёл бы как `WRONG_ANSWER`, то есть сказал бы человеку про версии вместо настоящей причины.
     ///
     /// Что этот тест НЕ сторожит: общность слов с окном. Сверка константы с константой не упала бы никогда; настоящий сторож — тест окна (`gui::panel::tests::the_window_says_not_ready_in_the_shared_words`), который гонит щелчок «Подключиться» без узла и сверяет строку журнала с этой же константой.

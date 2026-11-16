@@ -619,6 +619,33 @@ pub(crate) fn names(peer: &EndpointId, typed: &str) -> bool {
     typed == full || typed == short_key(&full).trim_start_matches('…')
 }
 
+/// Два РАЗНЫХ ключа с ОДИНАКОВЫМ коротким отпечатком — фикстура для прогонов, и одна на оба пути, где сличитель применяется: заявки
+/// (`Requests::answer`) и уже выданные разрешения (`door::revoke_for`). Записанная дважды, она разошлась бы при первой же правке
+/// `short_key`, а сторожит она как раз находку обзора безопасности.
+///
+/// Ищутся перебором семян: сокращение — четыре знака, то есть шестнадцать бит, и парадокс дней рождения даёт пару на второй-третьей
+/// тысяче за доли секунды. Ровно так же дёшево она достаётся и тому, кто подгоняет себе хвост нарочно, — в этом вся беда, от которой
+/// закрывается равенство вместо `ends_with`. Случайности здесь нет: семена идут подряд, и находка у каждого прогона одна и та же.
+#[cfg(test)]
+pub(crate) fn two_keys_that_end_alike() -> (EndpointId, EndpointId) {
+    let key_of = |n: u32| {
+        let mut seed = [0u8; 32];
+        seed[..4].copy_from_slice(&n.to_le_bytes());
+        iroh::SecretKey::from_bytes(&seed).public()
+    };
+    let mut seen: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let (first, second) = (0..60_000)
+        .find_map(|n| {
+            let tail = short_key(&key_of(n).to_string());
+            seen.insert(tail, n).map(|was| (was, n))
+        })
+        .expect("два ключа с одинаковым окончанием обязаны найтись задолго до этого предела");
+    let (a, b) = (key_of(first), key_of(second));
+    assert_eq!(short_key(&a.to_string()), short_key(&b.to_string()), "фикстура: окончания совпали");
+    assert_ne!(a, b, "а ключи разные — иначе прогон проверяет не то");
+    (a, b)
+}
+
 /// Заявки с таким отпечатком нет — отказ про ОПЕЧАТКУ, и он нарочно другой, чем «на неё уже ответили» (решение ведущего, задача 7):
 /// первое человек чинит, набрав отпечаток заново, второе значит, что заявку увели из-под него.
 ///
@@ -1734,28 +1761,12 @@ mod tests {
     /// Отказ превращает тихую подмену в видимую: человек отвечает ПОЛНЫМ ключом, который не подбирается, и он у него перед глазами
     /// (`door::request_lines` печатает готовую строку).
     ///
-    /// Два ключа с одинаковым окончанием ищутся перебором семян — парадокс дней рождения даёт их на второй-третьей тысяче, и поиск
-    /// занимает доли секунды. Случайности в тесте нет: семена идут подряд, и находка у каждого прогона одна и та же.
+    /// Два ключа с одинаковым окончанием даёт общая фикстура (`two_keys_that_end_alike`, там и про перебор семян) — та же самая, на
+    /// которой стоит сторож отзыва (`door::tests::revoking_by_a_tail_that_names_two_is_refused_not_guessed`): приём один, и второй
+    /// его записью они разошлись бы.
     #[test]
     fn two_requests_whose_keys_end_alike_are_refused_not_guessed() {
-        let mut seen: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-        let key_of = |n: u32| {
-            iroh::SecretKey::from_bytes(&{
-                let mut seed = [0u8; 32];
-                seed[..4].copy_from_slice(&n.to_le_bytes());
-                seed
-            })
-            .public()
-        };
-        let (first, second) = (0..60_000)
-            .find_map(|n| {
-                let tail = short_key(&key_of(n).to_string());
-                seen.insert(tail, n).map(|was| (was, n))
-            })
-            .expect("два ключа с одинаковым окончанием обязаны найтись задолго до этого предела");
-        let (a, b) = (key_of(first), key_of(second));
-        assert_eq!(short_key(&a.to_string()), short_key(&b.to_string()), "фикстура: окончания совпали");
-        assert_ne!(a, b, "а ключи разные — иначе тест проверяет не то");
+        let (a, b) = two_keys_that_end_alike();
 
         let store = Requests::default();
         let hang = |peer| {

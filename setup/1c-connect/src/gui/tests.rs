@@ -211,10 +211,10 @@ fn a_failed_tray_icon_leads_to_the_exit_path_not_a_silent_hang() {
     assert_eq!(exit_code_for(&failed, true), Some(1), "без значка окно не закрыть — код выхода ненулевой");
 }
 
-/// `serve` — не урезанная программа: значок он спрашивает такой же, как запуск с окном (`tray::build` в `launch` стоит ДО всякой
+/// `serve` — не урезанная программа: значок он спрашивает такой же, как запуск с окном (`tray::build` в `launched` стоит ДО всякой
 /// развилки и зовётся обоими). Разнятся они тем, что значит ОТКАЗ значка, и ещё пятью следствиями способа запуска — всего шесть,
 /// по строке таблицы в докстроке `Start`. Здесь сверяются четыре; «файл параметров» проверяется зовом `cfg::require_file` в теле
-/// `launch`, «обслуживание при старте» — тестом `link::tests::a_typed_serve_serves_whatever_the_autostart_checkbox_says`.
+/// `launched`, «обслуживание при старте» — тестом `link::tests::a_typed_serve_serves_whatever_the_autostart_checkbox_says`.
 ///
 /// **Чего этот тест НЕ сторожит: единственности пути подъёма.** Сторожа у неё нет вовсе, и выдумывать его дешевле не вышло. В
 /// сборке с окном `fn serve` в `main.rs` закрыт `#[cfg(not(feature = "gui"))]` и в неё не компилируется — но `connect` там есть, и
@@ -230,7 +230,7 @@ fn serving_without_a_window_still_raises_the_tray_icon() {
         let w = Start::Window { hidden };
         assert_eq!(exit_code_for(&failed, w.tray_is_vital()), Some(1), "{w:?}: окно без значка — ловушка, из неё нет выхода");
     }
-    // Ещё три отличия — те же, что в докстроке `Start`; четвёртое и пятое сверяются не здесь (см. докстроку теста).
+    // Ещё три отличия — те же, что в докстроке `Start`; пятое и шестое сверяются не здесь (см. докстроку теста).
     assert!(Start::Window { hidden: false }.shows_window(), "двойной щелчок окно показывает");
     assert!(!Start::Window { hidden: true }.shows_window(), "автозапуск при входе — нет");
     assert!(!Start::Serve.shows_window(), "`serve` окна при старте не показывает никогда");

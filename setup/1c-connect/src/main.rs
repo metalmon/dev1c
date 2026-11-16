@@ -201,9 +201,11 @@ fn run() -> Result<()> {
     // и `len() == 1`.
     #[cfg(feature = "gui")]
     if let Some(hidden) = gui_launch() {
-        let kit = ops_host::wire_state(Kit::discover("ONEC_CONNECT_KIT")?);
-        ops_host::ensure_state(&kit)?;
-        return one_c_connect::gui::launch(kit, Start::Window { hidden });
+        // Своей работы у ветви нет ни строки, и это не причёсывание: человек у окна увидит отказ, только если тот уйдёт общим
+        // путём, а путь начинается за этим вызовом. Прежде здесь стояли две строки подготовки, и их `?` нёс отказ в `main`, то
+        // есть в несуществующую консоль — молчаливый выход с кодом 1 (находка ревью круга 1 задачи 8). Сторож —
+        // `tests::the_window_branch_hands_the_whole_start_to_one_path`.
+        return one_c_connect::gui::launch_window(hidden);
     }
     let cli = Cli::parse();
     // `wire_state` разводит чтение и запись: из комплекта читаем, своё пишем
@@ -793,6 +795,30 @@ fn status_view(card: &str, st: &session::State) -> door::StatusView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Оконная ветвь `run` отдаёт подъём целиком одному пути и своей работы не делает** — красный тест круга правок 1 задачи 8.
+    ///
+    /// Чем куплен. До него ветвь сама искала комплект и заводила каталог состояния, и `?` этих двух строк нёс отказ в `main`, а
+    /// тот печатает в консоль, которой у запуска с окном нет: кривое `ONEC_CONNECT_KIT` или нехватка прав на каталог состояния
+    /// давали человеку молчаливый выход с кодом 1 — то самое положение 15.11, только обойдённое с фланга. Теперь обе строки живут
+    /// за `gui::launch_window`, под общим сторожем слов (`gui::seen_by_the_person`).
+    ///
+    /// Сторож ТЕКСТОВЫЙ, и это не от лени: обе строки отказывают до всякого окна, а показ сообщения ОС и выход из процесса в
+    /// прогоне не воспроизводятся вовсе. Приём тот же, что у `verify::tests` с `pack.sh` и `Dockerfile.1c`, — читаем
+    /// поставляемый исходник и смотрим, что в нём написано. Отсюда же правило для того, кто будет править ветвь: имён этих нет в
+    /// ней и в комментариях, потому что сторож прозу от кода не отличает.
+    #[cfg(feature = "gui")]
+    #[test]
+    fn the_window_branch_hands_the_whole_start_to_one_path() {
+        const SRC: &str = include_str!("main.rs");
+        let from = SRC.find("fn run()").expect("`run` на месте");
+        let to = from + SRC[from..].find("let cli = Cli::parse();").expect("разбор командной строки на месте");
+        let branch = &SRC[from..to];
+        for name in ["Kit::discover", "ensure_state", "wire_state"] {
+            assert!(!branch.contains(name), "{name} в оконной ветви: его отказ уйдёт мимо показа слов, и человек не увидит ничего");
+        }
+        assert!(branch.contains("gui::launch_window(hidden)"), "оконная ветвь обязана отдавать подъём единственному пути");
+    }
 
     #[test]
     fn serve_is_a_subcommand() {

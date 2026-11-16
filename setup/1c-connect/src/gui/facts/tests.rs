@@ -9,49 +9,6 @@ use core::prelude::v1::test;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-/// Вердикт из набора — задача 5. `Outcome::Bad` важнее `Outcome::Busy`
-/// независимо от того, какой факт в наборе раньше: поломку человек
-/// должен увидеть и при занятой базе, а не только свободной.
-#[test]
-fn the_verdict_reads_the_set_in_one_order() {
-    let good = Check::pass("база", "есть");
-    let busy = Check::busy("в базе открыт сеанс", "1 открыт сеанс 1С", "закройте Предприятие");
-    let bad = Check::fail("проект", "не разложен", "1c-connect install");
-    assert!(matches!(verdict_of(false, std::slice::from_ref(&good)), Verdict::Off), "выключено — ничего не считаем");
-    assert!(matches!(verdict_of(true, &[]), Verdict::Checking));
-    assert!(matches!(verdict_of(true, std::slice::from_ref(&good)), Verdict::Ready));
-    assert!(matches!(verdict_of(true, &[busy.clone(), good]), Verdict::Busy(_)));
-    // Поломка важнее занятости: её человек должен увидеть и при открытой базе.
-    assert!(matches!(verdict_of(true, &[busy, bad]), Verdict::NotReady(_)));
-}
-
-/// Граница спеки 31.10 (повод 1): вкладка «Инструменты» показывает состояние
-/// комплекта и при выключенных MCP, а вердикт от этого не меняется — он
-/// остаётся `Off` и фактов не читает вовсе. Самый опасный случай и проверяем:
-/// комплект НЕПОЛНЫЙ, то есть факт КРАСНЫЙ. Покрасить им значок при
-/// выключенном коннекторе значило бы кричать о проблеме там, где человек
-/// ничего не включал.
-///
-/// Своя грань у этого утверждения именно в красноте списка, и она здесь
-/// единственная в программе (круг исправления 31.10, пункт 4: ревью сочло
-/// утверждение проходящим при любом значении — замерено, это не так).
-/// Подмена, от которой оно стоит: перенести в `verdict_of` поиск
-/// `Outcome::Bad` ВЫШЕ раннего возврата по `serving` — тогда выключенный
-/// коннектор с неполным комплектом отдаёт `NotReady`, и значок краснеет. На
-/// той же подмене первая строка `the_verdict_reads_the_set_in_one_order`
-/// выше остаётся зелёной: она подставляет список из ОДНОГО ЗЕЛЁНОГО факта,
-/// которому и находиться-то раньше сторожа нечем, — то есть две эти строки
-/// не дублируют друг друга, а делят случай пополам.
-#[test]
-fn a_red_kit_fact_does_not_colour_the_verdict_while_mcp_are_off() {
-    let kit = vec![
-        Check::fail(verify::KIT, "файла нет", "комплект неполный — скопируйте заново"),
-        Check::fail(verify::TOOLS, "комплект неполный", "скопируйте полный комплект заново"),
-    ];
-    assert!(kit.iter().all(|c| c.outcome() == common::check::Outcome::Bad), "список обязан быть красным — иначе грани нет");
-    assert!(matches!(verdict_of(false, &kit), Verdict::Off), "выключено — вердикт `Off`, какими бы ни были факты комплекта");
-}
-
 /// Пошёл новый расчёт — набор на экране остаётся прежним, «Проверяю…» не
 /// возвращается (задача 5): такт гоняет этот путь каждые секунды, и
 /// сброс на каждый старт превратил бы карточку в мигающую.
@@ -170,23 +127,6 @@ fn the_check_button_does_not_race_the_tick() {
     assert!(ui.check_requested, "отметка кнопки не съедена чужим ответом");
 }
 
-/// Такт и поводы для пересчёта — задача 6. Изменившийся дешёвый факт
-/// тянет дорогие независимо от срока; неизменившийся — молчит до срока,
-/// который пореже при скрытом окне; а пропущенный надолго такт не
-/// «протухает»: `since_full` просто больше любого порога.
-#[test]
-fn a_changed_cheap_fact_pulls_the_expensive_ones() {
-    let free = vec![Check::pass("в базе открыт сеанс", "нет")];
-    let busy = vec![Check::busy("в базе открыт сеанс", "1 открыт сеанс 1С", "закройте")];
-    assert!(needs_full_pass(&busy, &free, Duration::ZERO, true), "закрыли базу — спросить заново");
-    assert!(!needs_full_pass(&free, &free, Duration::from_secs(5), true), "ничего не менялось — молчим");
-    assert!(needs_full_pass(&free, &free, SLOW_OPEN, true), "медленный такт при открытом окне");
-    assert!(!needs_full_pass(&free, &free, SLOW_OPEN, false), "при закрытом окне такт реже");
-    assert!(needs_full_pass(&free, &free, SLOW_HIDDEN, false));
-    // Окно было скрыто сутки — набор не «протухает»: считаем сразу.
-    assert!(needs_full_pass(&free, &free, Duration::from_secs(86_400), false));
-}
-
 /// Important 4 ревью задач 5+6: на потоке окна такт НЕ СЧИТАЕТ НИЧЕГО —
 /// он только решает по отметкам времени, пора ли, и заводит поток. Прежний
 /// такт звал на потоке окна `verify::cheap` и `configurator_count`:
@@ -276,26 +216,6 @@ fn a_cheap_answer_asks_for_the_expensive_pass_without_overtaking_it() {
     assert!(!ui.facts_again, "вердикт считается при выключенном обслуживании");
     assert_eq!(ui.sessions, Some(1), "при выключенном обслуживании такт что-то запомнил");
     assert_eq!(ui.prev_cheap, free);
-}
-
-/// Дефект (заказчик 2026-10-20): карточка не должна повторять подсказку,
-/// уже вписанную в сам текст факта (TOOLS-Blocked несёт её внутри
-/// `detail`, см. `ops_host::tools_state`), и никогда не говорит
-/// «факт N провален».
-#[test]
-fn readiness_reason_says_what_and_what_to_do_without_echoing_the_hint() {
-    let blocked = Check::fail(
-        "инструменты комплекта",
-        "в комплекте нет vrunner/, git/ или httpd/ — скопируйте полный комплект заново",
-        "скопируйте полный комплект заново",
-    );
-    let text = readiness_reason(&blocked);
-    assert_eq!(text.matches("скопируйте полный комплект заново").count(), 1, "{text}");
-    assert!(!text.to_lowercase().contains("факт"), "{text}");
-
-    let web = Check::fail("веб-сервер", "порт 1818 не отвечает", "запустите Apache/IIS, на котором опубликована база");
-    let text = readiness_reason(&web);
-    assert!(text.contains("порт 1818 не отвечает") && text.contains("запустите Apache/IIS"), "{text}");
 }
 
 /// Дефект (заказчик 2026-10-21): в строку итога вписали полный путь
@@ -517,9 +437,9 @@ fn the_journal_speaks_only_when_the_verdict_changes() {
     assert_eq!(ui.log.len(), before + 1, "тот же вердикт сказан дважды — журнал засыпан");
 }
 
-/// Задача 8: бейдж «Проблем: N» считает плохие факты ЖИВОГО набора.
-/// Занято — не провал ни в окне, ни в отчёте (решение владельца 25.10):
-/// человек, работающий в базе, получает 18 из 18 и строку «занято».
+/// Задача 8: бейдж «Проблем: N» держится за ЖИВОЙ набор (`Ui::facts`), а не за снимок последней проверки — правило самого счёта
+/// (`problem_count`, занятость не провал) проверяет `readiness::tests`; здесь — что счёт обновляется заявкой `apply_facts`, без
+/// всякого нажатия «Проверить», а не застывает на прежнем наборе.
 #[test]
 fn the_badge_counts_only_bad_facts() {
     let facts = vec![
@@ -528,12 +448,6 @@ fn the_badge_counts_only_bad_facts() {
         Check::busy("в базе открыт сеанс", "сеансов больше не осталось", "закройте «Предприятие»"),
         Check::fail("проект", "не разложен", "1c-connect install"),
     ];
-    assert_eq!(problem_count(&facts), 1);
-    // Пустой набор — не «ноль проблем доказано», но и показывать нечего:
-    // бейджа нет, а состояние говорит карточка («Проверяю…»).
-    assert_eq!(problem_count(&[]), 0);
-    // Набор живой: применился новый — изменилось и число, без всякого
-    // нажатия «Проверить».
     let mut ui = Ui::for_test();
     ui.cfg.current_mut().mode = "local".into();
     ui.enabled.store(true, Ordering::Relaxed);
@@ -652,20 +566,13 @@ fn the_verdict_is_not_computed_while_serving_is_off() {
     assert!(ui.facts_again, "обслуживание включено, а пересчёт не пошёл");
 }
 
-/// Сторож зависшего расчёта (находка S10): бюджет проверяется до факта, а
-/// не прерывает его, и поток может не ответить никогда. Залипшая защёлка
-/// означала бы вердикт, который больше не посчитается ни разу, — точка
-/// навсегда осталась бы «Проверяю…».
+/// Сторож зависшего расчёта (находка S10) — проводка через `start_facts`/`apply_facts`: правило самого срока (`readiness_lost`)
+/// проверяет `readiness::tests`, здесь — что живой поток не заводит второго, а потерянный заводит, и что ответ снимает защёлку и
+/// отметку времени, иначе следующий расчёт считал бы себя потерянным с рождения.
 #[test]
 fn a_lost_readiness_thread_does_not_latch_forever() {
     // Якорь в будущем: на свежей машине `Instant::now() - 5 мин` паникует.
     let now = Instant::now() + Duration::from_secs(3600);
-    assert!(!readiness_lost(Some(now), now));
-    assert!(!readiness_lost(Some(now), now + READINESS_LOST), "срок ещё не вышел");
-    assert!(readiness_lost(Some(now), now + READINESS_LOST + Duration::from_secs(1)));
-    assert!(readiness_lost(None, now), "защёлку взвели мимо `start_facts` — ждать нечего");
-
-    // Проводка: пока поток жив, второго не заводим; потерянный — заводим.
     let mut ui = Ui::for_test();
     let gen = start_facts(&mut ui, now).expect("первый расчёт идёт сам");
     assert!(start_facts(&mut ui, now + Duration::from_secs(30)).is_none(), "второй поток поверх живого");

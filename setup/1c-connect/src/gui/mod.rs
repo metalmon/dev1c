@@ -1855,16 +1855,8 @@ fn tick_redraw(window_open: bool, dirty: bool, running: bool, since_redraw: Dura
     dirty || running || (window_open && since_redraw >= REDRAW_IDLE)
 }
 
-/// Медленный такт: как часто идут весь дешёвый набор (`verify::cheap`) и —
-/// если он не изменился — дорогие факты. Открытое окно спрашивает чаще,
-/// скрытое реже, но идёт всё равно: иначе набор «протухнет» тихо, пока никто
-/// не смотрит. Секундный такт при открытом окне спрашивает ОДНО (число
-/// открытых сеансов 1С) — остальные дешёвые факты за секунду не меняются.
-pub const SLOW_OPEN: Duration = Duration::from_secs(30);
-
-// `STATUS_LINGER` (сколько итог операции держал слот подвала) ушёл вместе
-// со `status`: держать было нечего и некого — слота нет с 9.11.
-pub const SLOW_HIDDEN: Duration = Duration::from_secs(120);
+// Пороги медленного такта (`needs_full_pass`) переехали в бек (задача 11 плана «Сопряжение переезжает в бек», `readiness.rs`) — здесь реэкспорт, так что `gui::SLOW_OPEN`/`gui::SLOW_HIDDEN` остаются верными адресами.
+pub use crate::readiness::{SLOW_HIDDEN, SLOW_OPEN};
 
 /// Единый тик приложения (`launch` зовёт его раз в `TICK_BUSY`/`TICK_IDLE`):
 /// перерисовывает окно (см. `tick_redraw`), один раз на операцию отмечает

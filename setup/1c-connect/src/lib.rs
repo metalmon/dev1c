@@ -42,6 +42,8 @@ pub mod platform;
 pub mod ports;
 pub mod project;
 pub mod publication;
+/// Приговор о готовности агента добираться до базы — без фичи `gui`: `status` в командной строке прочитает его тем же путём, что карточка готовности (задача 11 плана «Сопряжение переезжает в бек»).
+pub mod readiness;
 pub mod secrets;
 pub mod session;
 pub mod single_instance;

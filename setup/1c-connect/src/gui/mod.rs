@@ -2373,7 +2373,7 @@ pub fn launch(kit: Kit, start: Start) -> anyhow::Result<()> {
     // двери задачей 9 плана, и снимок пополнится там. Поэтому `cards: None` — «о связи пока не сообщаю», и `status` говорит это
     // человеку СЛОВАМИ: пустой список здесь значил бы «связей нет», то есть ложь (разница названа типом, см.
     // `door::StatusView::cards`).
-    door.show(crate::door::StatusView { serving: serve_on_start, cards: None });
+    door.show(crate::door::StatusView { serving: serve_on_start, cards: None, kit: None });
     let door = Some(door);
     // Исход словами в консоль — ограничение «каждая команда печатает исход словами». `serve` поднимают из терминала, из
     // планировщика и из службы, и тому, кто смотрит на вывод, нужны те же два слова, что у `connect`: с чем подняли и когда

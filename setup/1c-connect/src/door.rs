@@ -109,6 +109,23 @@ pub enum Answer {
 pub struct StatusView {
     /// Поднято ли обслуживание вызовов агента прямо сейчас.
     pub serving: bool,
+    /// Какой комплект обслуживает держатель — его каталог состояния в
+    /// каноническом виде (`kit_mark`). Заполняет это поле САМА дверь
+    /// (`Door::show`), а не держатель: у держателя его не спрашивают, чтобы
+    /// он не мог ошибиться или забыть, и в литералах снимка стоит `None`.
+    ///
+    /// Зачем оно (круг правок 3 задачи 14). Дверь принадлежит УЧЁТНОЙ
+    /// ЗАПИСИ — замок считает единицей её, и это верно. Но живая копия
+    /// обслуживает ОДИН комплект, и вопрос «обслуживается ли мой» —
+    /// другой вопрос: `1c-connect mcp --kit B` при коннекторе на комплекте
+    /// A услышал бы «жив» про чужой комплект, и агент получил бы разрешение
+    /// там, где его базы не обслуживает никто.
+    ///
+    /// `None` — держатель о комплекте не сообщает (снимок по умолчанию,
+    /// которого человек не видит, либо сборка другой версии по ту сторону
+    /// двери).
+    #[serde(default)]
+    pub kit: Option<String>,
     /// Карточки, которым есть что сказать о связи. Карточка без состояния контракта в список не попадает вовсе: слово «не подключено» ставит строке экран (`gui::link::row`), и второй его копии здесь не будет.
     ///
     /// **`Option`, а не просто список, и это разница ТИПОМ, а не соглашением (решение ведущего, круг правок 1).** `None` — живой экземпляр о связи пока не сообщает (так отвечает путь окна: состояние карточек живёт в `Ui` внутри GPUI, и клиентом двери окно становится задачей 9 плана). `Some` с пустым списком — связей правда нет. Человеку эти два случая говорятся РАЗНЫМИ словами (`status_lines`), а пустой список, который на самом деле незнание, этим типом просто невыразим — поэтому и не нужно соглашения, которое кто-нибудь однажды не прочтёт.
@@ -132,11 +149,18 @@ pub type Serves = Arc<dyn Fn(Ask) -> Answer + Send + Sync>;
 pub struct Door {
     view: Arc<Mutex<StatusView>>,
     serves: Arc<Mutex<Option<Serves>>>,
+    /// Комплект, который обслуживает держатель этой двери, — меткой
+    /// (`kit_mark`). Дверь знает его с рождения (`open_at` открывают ПО
+    /// комплекту) и подставляет в каждый снимок сама: спрашивать его у
+    /// держателя значило бы дать ему ошибиться.
+    kit: String,
 }
 
 impl Door {
     /// Рассказать двери, что отвечать. Дверь — почтовый ящик, а не дознаватель: спрашивать живое состояние ей негде (у окна оно внутри GPUI, у `serve` — в замыкании сеанса), поэтому держатель сам кладёт сюда снимок всякий раз, когда тот меняется.
     pub fn show(&self, view: StatusView) {
+        // Комплект ставит дверь, а не держатель: что бы он ни положил в это поле, правда одна — тот комплект, по которому дверь и открыли.
+        let view = StatusView { kit: Some(self.kit.clone()), ..view };
         // Отравленный замок — не повод валить ответ: внутри только снимок, и прочитать его после чужой паники не опаснее, чем до.
         *self.view.lock().unwrap_or_else(|e| e.into_inner()) = view;
     }
@@ -156,17 +180,26 @@ impl Door {
         self.serves.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    fn new() -> Door {
-        Door { view: Arc::new(Mutex::new(StatusView::default())), serves: Arc::new(Mutex::new(None)) }
+    fn new(kit: &Kit) -> Door {
+        Door { view: Arc::new(Mutex::new(StatusView::default())), serves: Arc::new(Mutex::new(None)), kit: kit_mark(kit) }
     }
 }
 
 /// Строки, которыми живой экземпляр рассказывает о себе человеку, — здесь, а не в `main.rs`, ровно затем, чтобы их проверял тест: разницу «о связи пока не сообщает» и «связей нет» человек обязан ПРОЧЕСТЬ словами, а не вывести из пустоты (ограничение «молчаливого ответа не бывает»).
 ///
 /// Слово предмета — общая константа `SUBJECT`, а не своя: выключатель на экране, журнал и проверки называют его одними знаками, и `status` не имеет права назвать его иначе.
-pub fn status_lines(v: &StatusView) -> Vec<String> {
+pub fn status_lines(v: &StatusView, mine: &Kit) -> Vec<String> {
     let on = if v.serving { "включён" } else { "выключен" };
     let mut out = vec![format!("Отвечает живой экземпляр: {} {on}.", crate::SUBJECT)];
+    // Живой есть, но комплект у него ДРУГОЙ — и это первое, что человеку надо
+    // прочесть: без этой строки всё сказанное ниже он отнёс бы к своему
+    // комплекту, а оно про чужой. Слова общие с мостом (`ANOTHER_KIT`),
+    // второго текста на тот же случай нет.
+    if let Some(k) = &v.kit {
+        if *k != kit_mark(mine) {
+            out.push(format!("  {ANOTHER_KIT}: {k}"));
+        }
+    }
     match &v.cards {
         None => out.push("  о состоянии связи он пока не сообщает".into()),
         Some(cards) if cards.is_empty() => out.push("  ни одна карточка сейчас не связана".into()),
@@ -256,13 +289,44 @@ pub(crate) fn who_answers(name: &str) -> Knocked {
     })
 }
 
+/// Метка комплекта — его каталог состояния в каноническом виде, и единственное место, где она строится. Правило «тот же ли это путь» берётся у `holder::normal_path` и здесь не сочиняется: второе такое правило разошлось бы с первым при первой же правке.
+///
+/// Каталог СОСТОЯНИЯ, а не корень комплекта: на Linux состояние живёт отдельно от общего корня (`ops_host::wire_state`), и два рабочих места на одном комплекте различаются именно им.
+pub(crate) fn kit_mark(kit: &Kit) -> String {
+    crate::holder::normal_path(kit.state())
+}
+
+/// Слова человеку, когда живой экземпляр есть, но обслуживает он не тот комплект, о котором спрашивают. Живут один раз и здесь, рядом с вердиктом, — уходят и в журнал моста, и в вывод `status` (тот же приём, что у `gate::refuse_to_serve`).
+pub const ANOTHER_KIT: &str = "коннектор этой учётной записи запущен, но обслуживает другой комплект";
+
+/// Обслуживается ли ЭТОТ комплект живым экземпляром учётной записи — три исхода, и средний из них не «нет».
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Served {
+    /// Жив, обслуживает, и комплект тот самый.
+    Mine,
+    /// Жив и обслуживает, но НЕ этот комплект. Внутри — слова человеку: молчаливого «нет» здесь быть не должно, иначе человек ищет мёртвый коннектор вместо живого, который просто занят другим.
+    Another(String),
+    /// Не отвечает вовсе либо отвечает «не обслуживаю».
+    No,
+}
+
 /// Обслуживает ли держатель двери прямо сейчас — признак, который до задачи 14 держался отдельным объектом ядра (`single_instance::acquire_serving` — мьютекс на Windows, `flock` каталога на Linux).
 ///
 /// **Почему тот объект ушёл.** Он создавался БЕЗ префикса, то есть был виден только в своём сеансе, и единицу считал как «сеанс × учётка × комплект». На машине утреннего прогона окно поднимает задача планировщика — в своём сеансе; человек из своего сеанса спросил бы признак и получил «не обслуживает» при живом и работающем коннекторе: агенты выглядели бы выключенными, а сторож моста (`orphan::guard_owner`) увёл бы мост. Ровно та беда, которую задача чинила этажом выше, оставленная этажом ниже.
 ///
 /// Держатель и так знает, обслуживает ли он: `serving` лежит в его снимке с задачи 5. Значит спрашивать надо его, а не второй объект про то же самое. Ответ вышел строже прежнего: дверь отвечает, только если держатель ЖИВ и обслуживает, а чужую дверь под нашим именем `ask_at` отсекает до первого слова (`STRANGER_DOOR`).
-pub(crate) fn serving_at(name: &str) -> bool {
-    matches!(ask_at(name, Ask::Status), Ok(Answer::Status(v)) if v.serving)
+pub(crate) fn served_at(name: &str, mine: &Kit) -> Served {
+    let Ok(Answer::Status(v)) = ask_at(name, Ask::Status) else { return Served::No };
+    if !v.serving {
+        return Served::No;
+    }
+    match v.kit {
+        Some(ref k) if *k == kit_mark(mine) => Served::Mine,
+        // Сказал, какой, и это не наш.
+        Some(k) => Served::Another(format!("{ANOTHER_KIT}: {k}")),
+        // Не сказал вовсе — сборка по ту сторону двери другой версии. Утверждать за неё «обслуживает наш» нельзя: чего не доказали, того не утверждаем, и человеку это говорится словами, а не молчаливым «нет».
+        None => Served::Another(format!("{ANOTHER_KIT} — какой именно, он не сообщает (похоже, он другой версии)")),
+    }
 }
 
 /// Спросить живого — сторона клиента. Своего бека не поднимает и ничем не владеет: нет живого — `NO_BACK_END` словами.
@@ -398,7 +462,7 @@ pub(crate) fn open_at(name: &str, kit: &Kit) -> io::Result<Door> {
         let _in_rt = rt.enter();
         pipe(&path, &rights, true)?
     };
-    let door = Door::new();
+    let door = Door::new(kit);
     let mine = door.clone();
     let kit = kit.clone();
     std::thread::spawn(move || {
@@ -504,7 +568,7 @@ pub(crate) fn open_at(name: &str, kit: &Kit) -> io::Result<Door> {
     //
     // ponytail: между `bind` и этой строкой сокет недолго живёт с правами по умолчанию (umask), и в эту щель чужой успел бы соединиться. Закрыта она не здесь, а `peer_is_ours` на приёме: uid пришедшего сверяется с нашим на КАЖДЫЙ стук. Снимать щель заранее нечем — `umask` общий на процесс, и трогать его ради одного файла значило бы править чужие.
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-    let door = Door::new();
+    let door = Door::new(kit);
     let mine = door.clone();
     let kit = kit.clone();
     std::thread::spawn(move || {
@@ -659,17 +723,21 @@ mod tests {
     }
 
     /// Спросили — ответили: круг «клиент → бек → клиент» целиком, без сети. Сверяется и то, что доехал сам снимок, а не только факт ответа: кадр двери возит значение, и подменённое поле здесь было бы видно.
+    ///
+    /// Снимок едет тот, что показал держатель, ПЛЮС комплект от самой двери (круг правок 3): это поле она заполняет сама и нарочно — см. `StatusView::kit`. Поэтому и сверка с ожидаемым идёт по снимку с проставленным комплектом, а не по тому, что держатель отдал.
     #[test]
     fn an_open_door_answers_the_one_who_knocks() {
         let (_dir, kit) = kit_for_test();
         let name = test_door("open");
         let door = open_at(&name, &kit).expect("дверь открылась");
-        let shown = StatusView {
-            serving: true, cards: Some(vec![CardState { name: "Ромашка".into(), word: "подключено".into() }])
-        };
+        let shown =
+            StatusView {
+                serving: true, cards: Some(vec![CardState { name: "Ромашка".into(), word: "подключено".into() }]), kit: None
+            };
         door.show(shown.clone());
+        let expected = StatusView { kit: Some(kit_mark(&kit)), ..shown };
         match ask_at(&name, Ask::Status) {
-            Ok(Answer::Status(got)) => assert_eq!(got, shown, "ответ — тот снимок, что показал держатель"),
+            Ok(Answer::Status(got)) => assert_eq!(got, expected, "ответ — снимок держателя с комплектом, проставленным дверью"),
             other => panic!("живой обязан ответить: {other:?}"),
         }
     }
@@ -680,7 +748,7 @@ mod tests {
         let (_dir, kit) = kit_for_test();
         let name = test_door("twice");
         let door = open_at(&name, &kit).expect("дверь открылась");
-        door.show(StatusView { serving: true, cards: Some(vec![]) });
+        door.show(StatusView { serving: true, cards: Some(vec![]), kit: None });
         for n in 1..=3 {
             let Ok(Answer::Status(got)) = ask_at(&name, Ask::Status) else { panic!("стук {n} остался без ответа") };
             assert!(got.serving, "стук {n}");
@@ -711,6 +779,64 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600, "ни группе, ни остальным — ничего: {mode:o}");
     }
 
+    /// **Коннектор на ДРУГОМ комплекте — не «жив» и не «мёртв», а третий
+    /// случай со своими словами** (красный тест круга правок 3).
+    ///
+    /// Дверь принадлежит учётной записи, и это верно для ЗАМКА: одна копия
+    /// на человека. Но обслуживает живая копия ОДИН комплект, и `1c-connect
+    /// mcp --kit B` при коннекторе на комплекте A услышал бы «жив» про чужой
+    /// — агент получил бы разрешение там, где его базы никто не обслуживает.
+    ///
+    /// Три ответа и три разных исхода: свой комплект, чужой комплект,
+    /// никого. Сними сверку — и средний сольётся с первым; ответь на чужой
+    /// комплект молчаливым «нет» — и он сольётся с третьим, а человек пойдёт
+    /// искать мёртвый коннектор вместо живого, который просто занят другим.
+    #[test]
+    fn a_connector_serving_another_kit_is_neither_alive_nor_dead_for_this_one() {
+        let (_one, mine) = kit_for_test();
+        let (_two, other) = kit_for_test();
+        let name = test_door("other-kit");
+        let door = open_at(&name, &mine).expect("дверь открылась");
+        door.show(StatusView { serving: true, cards: None, kit: None });
+
+        assert_eq!(served_at(&name, &mine), Served::Mine, "свой комплект — обслуживается");
+        let Served::Another(why) = served_at(&name, &other) else {
+            panic!("чужой комплект обязан быть ТРЕТЬИМ случаем, а не «жив» и не «мёртв»: {:?}", served_at(&name, &other))
+        };
+        assert!(why.contains(ANOTHER_KIT), "слова — общие, а не свои на этот случай: {why}");
+        assert!(why.contains(&kit_mark(&mine)), "человеку назван тот комплект, который держат: {why}");
+
+        // И третий случай отдельно от обоих: за этим именем никого нет.
+        assert_eq!(served_at(&test_door("other-kit-nobody"), &mine), Served::No, "двери нет — это «нет», а не чужой комплект");
+    }
+
+    /// Снимок несёт комплект, и кладёт его САМА дверь: что бы ни положил в
+    /// это поле держатель, правда одна — тот комплект, по которому дверь
+    /// открыли. Забыть или ошибиться держателю тем самым нечем.
+    #[test]
+    fn the_door_fills_the_kit_in_the_snapshot_itself_not_the_holder() {
+        let (_dir, kit) = kit_for_test();
+        let name = test_door("kit-field");
+        let door = open_at(&name, &kit).expect("дверь открылась");
+        door.show(StatusView { serving: true, cards: None, kit: Some("выдумка держателя".into()) });
+        let Ok(Answer::Status(v)) = ask_at(&name, Ask::Status) else { panic!("живой обязан ответить") };
+        assert_eq!(v.kit.as_deref(), Some(kit_mark(&kit).as_str()), "дверь подставила свой комплект, а не сказанное держателем");
+    }
+
+    /// `status` человеку: живой экземпляр на ДРУГОМ комплекте обязан сказать
+    /// об этом словами, иначе всё напечатанное ниже человек отнесёт к своему
+    /// комплекту, а оно про чужой. Слова те же, что у моста.
+    #[test]
+    fn status_says_it_plainly_when_the_live_copy_serves_another_kit() {
+        let (_one, mine) = kit_for_test();
+        let (_two, other) = kit_for_test();
+        let about_other = StatusView { serving: true, cards: Some(vec![]), kit: Some(kit_mark(&other)) };
+        let lines = status_lines(&about_other, &mine);
+        assert!(lines.iter().any(|l| l.contains(ANOTHER_KIT)), "про чужой комплект сказано словами: {lines:?}");
+        let about_mine = StatusView { serving: true, cards: Some(vec![]), kit: Some(kit_mark(&mine)) };
+        assert!(!status_lines(&about_mine, &mine).iter().any(|l| l.contains(ANOTHER_KIT)), "свой комплект — и лишней строки про чужой нет");
+    }
+
     /// Имя двери помощнику и каталог его комплекта — переменные окружения: другого способа договориться с ЧУЖИМ процессом у теста нет, а в этом и смысл меры.
     const HELPER_DOOR: &str = "DEV1C_DOOR_HELPER";
     const HELPER_KIT: &str = "DEV1C_DOOR_HELPER_KIT";
@@ -723,7 +849,9 @@ mod tests {
         let kit = Kit::at(std::path::Path::new(&dir));
         let door = open_at(&name, &kit).expect("помощник открыл дверь");
         door.show(StatusView {
-            serving: true, cards: Some(vec![CardState { name: "Ромашка".into(), word: "подключено".into() }])
+            serving: true,
+            cards: Some(vec![CardState { name: "Ромашка".into(), word: "подключено".into() }]),
+            kit: None,
         });
         // Переживать родителя помощнику незачем: тот снимает его сам, а срок здесь — страховка от осиротевшего процесса, если родитель упадёт.
         std::thread::sleep(Duration::from_secs(30));
@@ -797,7 +925,7 @@ mod tests {
         let (_dir, kit) = kit_for_test();
         let name = test_door("busy");
         let door = open_at(&name, &kit).expect("дверь открылась");
-        door.show(StatusView { serving: true, cards: Some(vec![]) });
+        door.show(StatusView { serving: true, cards: Some(vec![]), kit: None });
         door.answers(a_doer(Answer::Dialled(Ok(an_outcome())), Duration::from_secs(2)));
         let slow_name = name.clone();
         let slow = std::thread::spawn(move || ask_at(&slow_name, Ask::Dial { code: "код".into(), card: None }));
@@ -874,17 +1002,20 @@ mod tests {
     /// «О связи пока не сообщает» и «связей нет» — РАЗНЫЕ слова человеку, а не одна пустота на оба случая. Тест и держит это различие: пропади оно, `status` отвечал бы молчанием там, где обязан отвечать словами.
     #[test]
     fn not_telling_and_nothing_connected_are_different_words() {
-        let unknown = status_lines(&StatusView { serving: true, cards: None });
-        let none = status_lines(&StatusView { serving: true, cards: Some(vec![]) });
-        let one = status_lines(&StatusView {
-            serving: true,
-            cards: Some(vec![CardState { name: "Ромашка".into(), word: "подключено".into() }]),
-        });
+        let (_dir, kit) = kit_for_test();
+        let unknown = status_lines(&StatusView { serving: true, cards: None, kit: None }, &kit);
+        let none = status_lines(&StatusView { serving: true, cards: Some(vec![]), kit: None }, &kit);
+        let one = status_lines(
+            &StatusView {
+                serving: true, cards: Some(vec![CardState { name: "Ромашка".into(), word: "подключено".into() }]), kit: None
+            },
+            &kit,
+        );
         assert_ne!(unknown, none, "незнание и отсутствие связей не одно и то же");
         assert!(unknown[1].contains("не сообщает"), "{:?}", unknown);
         assert!(none[1].contains("не связана"), "{:?}", none);
         assert!(one[1].contains("Ромашка") && one[1].contains("подключено"), "{:?}", one);
         assert!(one[0].contains(crate::SUBJECT), "предмет назван общим словом: {:?}", one);
-        assert!(status_lines(&StatusView { serving: false, cards: None })[0].contains("выключен"));
+        assert!(status_lines(&StatusView { serving: false, cards: None, kit: None }, &kit)[0].contains("выключен"));
     }
 }

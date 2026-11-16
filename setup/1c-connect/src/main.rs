@@ -282,7 +282,7 @@ fn run() -> Result<()> {
             match door::ask(door::Ask::Status) {
                 // Слова — в `door::status_lines` и только там: там же их проверяет тест, который держит разницу «о связи пока не сообщает» и «связей нет». Карточка без состояния контракта своей строки не получает вовсе — так же, как в списке окна (`contract::contract_word` отдаёт `None`), и слова за неё дверь не выдумывает.
                 Ok(door::Answer::Status(v)) => {
-                    for line in door::status_lines(&v) {
+                    for line in door::status_lines(&v, &ctx.kit) {
                         println!("{line}");
                     }
                 }
@@ -523,7 +523,7 @@ fn connect(ctx: &Ctx) -> Result<()> {
     // этой дверью пока не рассказывает — `cards: None` и есть «о связи не
     // сообщаю», и `status` говорит это человеку словами.
     let door = single_instance::acquire(&ctx.kit, false)?;
-    door.show(door::StatusView { serving: true, cards: None });
+    door.show(door::StatusView { serving: true, cards: None, kit: None });
     // Межпроцессная часть замка проекта (`project::hold`): без этого вызова
     // файл не заводится, и второй долгоживущий процесс (другой редактор,
     // будущая подкоманда `mcp`) замка вовсе не увидит.
@@ -704,7 +704,7 @@ fn status_view(card: &str, st: &session::State) -> door::StatusView {
     let word = contract_of(Some(st), &Enroll::default()).and_then(contract_word);
     // `Some`, а не `None`: эта подкоманда о связи СООБЩАЕТ — пустой список здесь значит «связей нет», и это правда, а не незнание (разница названа типом, см. `door::StatusView::cards`).
     let cards = word.map(|w| vec![door::CardState { name: card.to_string(), word: w.to_string() }]).unwrap_or_default();
-    door::StatusView { serving: true, cards: Some(cards) }
+    door::StatusView { serving: true, cards: Some(cards), kit: None }
 }
 
 #[cfg(test)]

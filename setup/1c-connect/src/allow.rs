@@ -55,11 +55,11 @@ pub fn write(kit: &Kit, on: bool) -> anyhow::Result<()> {
 /// (`main.rs`, `gui/mod.rs`) — вопрос один, «обслуживает ли кто-то это
 /// рабочее место», и headless `serve` отвечает на него так же честно, как
 /// окно.
-pub(crate) fn connector_alive() -> bool {
+pub(crate) fn connector_alive(kit: &Kit) -> crate::door::Served {
     // Не спросилось (учётная запись не узналась) — то же самое непонятное,
     // что и чужое слово в файле: закрыто по умолчанию. Живого нет —
-    // `is_serving` и так отдаёт `false`, отказом это не считается.
-    single_instance::is_serving().unwrap_or(false)
+    // `serves_our_kit` и так отдаёт `No`, отказом это не считается.
+    single_instance::serves_our_kit(kit).unwrap_or(crate::door::Served::No)
 }
 
 /// Прочитать разрешение прямо сейчас: файл с диска плюс живость владельца,
@@ -143,7 +143,7 @@ mod tests {
     fn a_serving_connector(kit: &Kit) -> (String, crate::door::Door) {
         let name = crate::door::door_name(&unique("allow-door"));
         let door = crate::door::open_at(&name, kit).expect("дверь открылась");
-        door.show(crate::door::StatusView { serving: true, cards: None });
+        door.show(crate::door::StatusView { serving: true, cards: None, kit: None });
         (name, door)
     }
 
@@ -167,9 +167,9 @@ mod tests {
         let kit = kit_in(tempdir());
         write(&kit, true).unwrap();
         let (name, door) = a_serving_connector(&kit);
-        let alive = || crate::door::serving_at(&name);
+        let alive = || crate::door::served_at(&name, &kit) == crate::door::Served::Mine;
         assert!(read_with(&kit, alive), "коннектор обслуживает — файл «on» должен читаться как разрешение");
-        door.show(crate::door::StatusView { serving: false, cards: None });
+        door.show(crate::door::StatusView { serving: false, cards: None, kit: None });
         assert!(!read_with(&kit, alive), "коннектор не обслуживает — тот же файл «on» больше не разрешение");
     }
 }

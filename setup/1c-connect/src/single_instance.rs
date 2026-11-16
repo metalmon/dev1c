@@ -445,8 +445,16 @@ pub fn is_held(account: &str) -> bool {
     crate::door::who_answers(&crate::door::door_name(account)) == crate::door::Knocked::Ours
 }
 
-/// Обслуживает ли сейчас живой экземпляр этой учётной записи — ВОПРОС К
-/// ДВЕРИ, а не второй объект ядра про то же самое (круг правок 2 задачи 14).
+/// Обслуживается ли ЭТОТ комплект живым экземпляром учётной записи — ВОПРОС
+/// К ДВЕРИ, а не второй объект ядра про то же самое (круг правок 2 задачи
+/// 14).
+///
+/// **Комплект в вопросе — не придирка** (круг правок 3). Замок считает
+/// единицей учётную запись, и это правда; но живая копия обслуживает ОДИН
+/// комплект, и «жив ли коннектор» с «обслуживается ли мой комплект» — два
+/// разных факта. Без второго `1c-connect mcp --kit B` при коннекторе на
+/// комплекте A услышал бы «жив», и агент получил бы разрешение там, где его
+/// базы не обслуживает никто.
 ///
 /// **Чем был плох объект.** Мьютекс признака создавался без префикса, то
 /// есть был виден только в своём сеансе, а на Linux тем же вопросом был
@@ -461,8 +469,8 @@ pub fn is_held(account: &str) -> bool {
 /// Держатель двери и так знает, обслуживает ли он (`serving` в его снимке с
 /// задачи 5). Ответ вышел строже прежнего: дверь отвечает, только если
 /// держатель жив И обслуживает.
-pub fn is_serving() -> std::io::Result<bool> {
-    Ok(crate::door::serving_at(&crate::door::door_name(&account()?)))
+pub fn serves_our_kit(kit: &Kit) -> std::io::Result<crate::door::Served> {
+    Ok(crate::door::served_at(&crate::door::door_name(&account()?), kit))
 }
 
 #[cfg(test)]
@@ -676,13 +684,17 @@ mod tests {
         let (_dir, kit) = kit_for_test();
         let account = unique("serving");
         let name = crate::door::door_name(&account);
-        assert!(!crate::door::serving_at(&name), "замка никто не держал — и обслуживать некому");
+        assert_eq!(crate::door::served_at(&name, &kit), crate::door::Served::No, "замка никто не держал — и обслуживать некому");
         let door = acquire_at(&account, &kit, false).expect("замок свободен");
         assert!(is_held(&account), "замок взят — держатель отвечает");
-        assert!(!crate::door::serving_at(&name), "замок взят, но обслуживание ещё не объявлено");
-        door.show(crate::door::StatusView { serving: true, cards: None });
-        assert!(crate::door::serving_at(&name), "держатель объявил обслуживание — и видно это тем же ключом, что держит замок");
-        door.show(crate::door::StatusView { serving: false, cards: None });
-        assert!(!crate::door::serving_at(&name), "выключил — видно сразу, без ожидания");
+        assert_eq!(crate::door::served_at(&name, &kit), crate::door::Served::No, "замок взят, но обслуживание ещё не объявлено");
+        door.show(crate::door::StatusView { serving: true, cards: None, kit: None });
+        assert_eq!(
+            crate::door::served_at(&name, &kit),
+            crate::door::Served::Mine,
+            "держатель объявил обслуживание — и видно это тем же ключом, что держит замок"
+        );
+        door.show(crate::door::StatusView { serving: false, cards: None, kit: None });
+        assert_eq!(crate::door::served_at(&name, &kit), crate::door::Served::No, "выключил — видно сразу, без ожидания");
     }
 }

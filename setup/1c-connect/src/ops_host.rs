@@ -1691,10 +1691,10 @@ fn cmd_log_sink(kit: &Kit) -> Sink {
 /// и ставит ОДИН раз: вопрос «жив ли тот, кого я обслуживаю» задаётся в
 /// подкоманде в одном месте, а тест подставляет сюда свою дверь — имя двери
 /// настоящей копии он занять не вправе.
-type Alive = Arc<dyn Fn() -> bool + Send + Sync>;
+type Alive = Arc<dyn Fn() -> crate::door::Served + Send + Sync>;
 
-fn mcp_tick(kit: &Kit, alive: &Alive) -> (bool, Result<Cfg, String>) {
-    let allowed = crate::allow::read_with(kit, || alive());
+fn mcp_tick(kit: &Kit, alive: bool) -> (bool, Result<Cfg, String>) {
+    let allowed = crate::allow::read_with(kit, || alive);
     let licensed = !matches!(crate::licence::state_now(), crate::licence::State::Expired);
     (allowed && licensed, Cfg::load(kit).map_err(|e| e.to_string()))
 }
@@ -1756,8 +1756,25 @@ fn watch_mcp(kit: Kit, live: crate::session::Live, log: Sink, alive: Alive) -> A
         // же поломкой не заливал журнал одинаковыми строками, пока человек
         // ещё правит toml (тот же приём, что `bridge.rs::last_logged_error`).
         let mut last_parse_err: Option<String> = None;
+        // То же, но про чужой комплект за дверью: причина повторяется каждый
+        // такт, а человеку нужна одна строка.
+        let mut last_kit_note: Option<String> = None;
         loop {
-            let (enabled, cfg) = mcp_tick(&kit, &alive);
+            // Живой есть, но обслуживает он ДРУГОЙ комплект — это не «мёртв», и
+            // молчать об этом нельзя: иначе человек ищет мёртвый коннектор
+            // вместо живого, который просто занят другим. Слова — общие
+            // (`door::ANOTHER_KIT`), и говорятся один раз на причину, а не
+            // пять раз в секунду (тот же приём, что у `last_parse_err` ниже).
+            let served = alive();
+            if let crate::door::Served::Another(why) = &served {
+                if last_kit_note.as_deref() != Some(why.as_str()) {
+                    log(Event::Warn(why.clone()));
+                    last_kit_note = Some(why.clone());
+                }
+            } else {
+                last_kit_note = None;
+            }
+            let (enabled, cfg) = mcp_tick(&kit, served == crate::door::Served::Mine);
             out.store(enabled, Ordering::Relaxed);
             match cfg {
                 Ok(cfg) => {
@@ -1857,7 +1874,10 @@ pub fn run_mcp(server: McpServer, kit: Kit) -> Result<()> {
     crate::orphan::guard_owner(log.clone());
     // Живость коннектора — отсюда и больше ниоткуда: один вопрос, один
     // способ его задать (управляющая дверь, `allow::connector_alive`).
-    let enabled = watch_mcp(kit.clone(), live.clone(), log.clone(), Arc::new(crate::allow::connector_alive));
+    let enabled = watch_mcp(kit.clone(), live.clone(), log.clone(), {
+        let kit = kit.clone();
+        Arc::new(move || crate::allow::connector_alive(&kit))
+    });
     // Порт подкоманде больше не нужен: вид сервера она знает прямо и отдаёт его словом (`session::Served`). `Ports` остаются — их
     // берёт сам `Serve`.
     let ports = cfg.ports();
@@ -3584,7 +3604,7 @@ mod tests {
     fn mcp_tick_is_closed_by_default_on_an_empty_kit() {
         let dir = mcp_test_dir("mcp-tick-empty");
         let kit = Kit::at(&dir);
-        let (enabled, cfg) = mcp_tick(&kit, &(Arc::new(|| false) as Alive));
+        let (enabled, cfg) = mcp_tick(&kit, false);
         assert!(!enabled, "никто не обслуживает комплект — разрешения нет");
         assert!(cfg.is_ok(), "{cfg:?}");
         let _ = std::fs::remove_dir_all(&dir);
@@ -3599,8 +3619,9 @@ mod tests {
     fn a_serving_connector(kit: &Kit, tag: &str) -> (Alive, crate::door::Door) {
         let name = crate::door::door_name(&format!("ops-{tag}-{}", std::process::id()));
         let door = crate::door::open_at(&name, kit).expect("дверь открылась");
-        door.show(crate::door::StatusView { serving: true, cards: None });
-        (Arc::new(move || crate::door::serving_at(&name)), door)
+        door.show(crate::door::StatusView { serving: true, cards: None, kit: None });
+        let mine = kit.clone();
+        (Arc::new(move || crate::door::served_at(&name, &mine)), door)
     }
 
     /// Тот же тик — `true`, когда признак на диске «on» и признак
@@ -3612,10 +3633,10 @@ mod tests {
         let kit = Kit::at(&dir);
         crate::allow::write(&kit, true).unwrap();
         let (alive, door) = a_serving_connector(&kit, "tick-open");
-        let (enabled, _) = mcp_tick(&kit, &alive);
+        let (enabled, _) = mcp_tick(&kit, alive() == crate::door::Served::Mine);
         assert!(enabled, "коннектор обслуживает, признак «on» — разрешение должно быть");
-        door.show(crate::door::StatusView { serving: false, cards: None });
-        let (enabled, _) = mcp_tick(&kit, &alive);
+        door.show(crate::door::StatusView { serving: false, cards: None, kit: None });
+        let (enabled, _) = mcp_tick(&kit, alive() == crate::door::Served::Mine);
         assert!(!enabled, "коннектор перестал обслуживать — тот же файл больше не разрешение");
         let _ = std::fs::remove_dir_all(&dir);
     }

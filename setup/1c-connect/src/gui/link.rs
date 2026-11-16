@@ -473,7 +473,7 @@ pub fn set_serving(ui: &mut Ui, on: bool) {
         );
     }
     if let Some(d) = &ui.door {
-        d.show(crate::door::StatusView { serving: on, cards: None });
+        d.show(crate::door::StatusView { serving: on, cards: None, kit: None });
     }
 }
 

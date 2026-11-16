@@ -282,16 +282,26 @@ pub fn same_owner(expected: &str, actual: &str) -> bool {
 /// файл. Приведение юникодное (`to_lowercase`), не ASCII-овское: комплект
 /// может лежать в каталоге с русским именем.
 pub fn same_image(expected: &std::path::Path, actual: &std::path::Path) -> bool {
-    fn normal(p: &std::path::Path) -> String {
-        let full = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-        let s = full.to_string_lossy().to_string();
-        if cfg!(windows) {
-            s.to_lowercase()
-        } else {
-            s
-        }
+    normal_path(expected) == normal_path(actual)
+}
+
+/// Путь в каноническом виде одной строкой — то же правило, что у
+/// `same_image` (оно на нём и стоит), но отдельным именем: по этой строке
+/// управляющая дверь говорит, КАКОЙ комплект обслуживает живой экземпляр
+/// (`door::kit_mark`), и сравнивает её с комплектом спрашивающего. Правило
+/// одно на оба дела — второе «тот же ли это путь» разошлось бы с первым.
+///
+/// Не существующий путь `canonicalize` не разворачивает; берём его как есть
+/// — для сравнения этого довольно, а отказывать из-за ещё не созданного
+/// каталога было бы хуже.
+pub fn normal_path(p: &std::path::Path) -> String {
+    let full = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let s = full.to_string_lossy().to_string();
+    if cfg!(windows) {
+        s.to_lowercase()
+    } else {
+        s
     }
-    normal(expected) == normal(actual)
 }
 
 /// Имя и pid процесса, слушающего `port` на loopback (или на всех адресах —

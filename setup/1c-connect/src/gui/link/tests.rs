@@ -935,3 +935,41 @@ fn the_window_tells_the_door_the_state_of_every_card() {
     ui.link = State::Off;
     assert_eq!(door_view(&ui).cards, Some(vec![]), "связей нет — это ответ, а не незнание");
 }
+
+/// **Слово и цвет назначаются вместе, и сторож этого — здесь** (Important 4 ревью всей работы).
+///
+/// Чем куплен. Словарь состояний уехал в бек задачей 10, цвет точки по закону 8 остался в окне — и сопоставлялся со словом
+/// СТРОКОВЫМ СРАВНЕНИЕМ. Правка формулировки в беке («разорвано» → «связь разорвана») молча перекрасила бы красную точку в жёлтую:
+/// `assert` на `dot` в этом файле не было ни одного. Свёртка теперь читает ВАРИАНТ (`dot_of`), и забытый случай просто не
+/// компилируется, — но пара «слово ↔ цвет» всё равно под присмотром, и присматривает за ней этот тест.
+///
+/// Ожидания записаны ЛИТЕРАЛАМИ нарочно: подставь сюда `contract_word`, и тест сверял бы строку с той самой функцией, из которой
+/// она взята, — то есть не сверял бы ничего (правило ветки, круг правок 2 задачи 3). Поэтому правка слова в беке красит тест
+/// красным и заставляет автора сказать вслух, остаётся ли цвет прежним.
+///
+/// Проба сделана: смени здесь любой цвет на соседний либо любое слово на знак — тест краснеет.
+#[test]
+fn a_word_and_a_colour_are_set_together() {
+    use crate::gui::facts::Dot;
+    let expected = |k: Contract| match k {
+        Contract::No => (None, Dot::Off),
+        Contract::CodeIssued => (Some("ждёт разрешения"), Dot::Warn),
+        Contract::Waiting => (Some("ждёт разрешения"), Dot::Warn),
+        Contract::Allowed => (Some("подключается"), Dot::Warn),
+        Contract::Up => (Some("подключено"), Dot::Up),
+        Contract::Broken => (Some("разорвано"), Dot::Down),
+        Contract::Retrying => (Some("подключается снова"), Dot::Warn),
+        Contract::Declined => (Some("отклонено"), Dot::Warn),
+    };
+    for k in CONTRACT_STATES {
+        let (word, dot) = expected(k);
+        assert_eq!(contract_word(k), word, "{k:?}: слово в беке переписали — проверьте цвет рядом и поправьте ожидание");
+        assert_eq!(dot_of(Some(k)), dot, "{k:?}: цвет точки");
+    }
+    // Состояния контракта нет вовсе — обслуживание не поднято. Слово ставит `row`, цвет — та же серая точка, что у `Contract::No`.
+    assert_eq!(dot_of(None), Dot::Off);
+    let c = Connection { mode: "tunnel".into(), ..Default::default() };
+    assert_eq!(row(&c, false, None).dot, Dot::Off, "«не подключено» — серая точка");
+    assert_eq!(row(&c, false, Some(&State::Up { since: Instant::now() })).dot, Dot::Up, "«подключено» — зелёная");
+    assert_eq!(row(&c, false, Some(&State::Failed(String::new()))).dot, Dot::Down, "«разорвано» — красная");
+}

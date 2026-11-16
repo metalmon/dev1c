@@ -12,7 +12,6 @@ use clap::{Parser, Subcommand};
 use common::kit::Kit;
 use common::op::CleanLevel;
 use common::{AlwaysDefault, Event, Prompt, Runner, StdinPrompt};
-#[cfg(not(feature = "gui"))]
 use one_c_connect::gate;
 #[cfg(feature = "gui")]
 use one_c_connect::gui::Start;
@@ -327,7 +326,8 @@ fn run() -> Result<()> {
             }
             println!();
             // Дверь — последней строкой и первым клиентом: всё выше прочитано с диска и печатается всегда, а здесь впервые говорит ЖИВОЙ экземпляр. Разница названа словами нарочно: иначе человек не поймёт, свежее он видит или лежалое — а `status` он набирает ровно за этим.
-            match door::ask(door::Ask::Status) {
+            // Единственный вопрос, который `ask` пропускает к ЛЮБОМУ комплекту (там и довод): про чужой комплект `status` обязан рассказать, а не отказать — за этим его и набирают.
+            match door::ask(&ctx.kit, door::Ask::Status) {
                 // Слова — в `door::status_lines` и только там: там же их проверяет тест, который держит разницу «о связи пока не сообщает» и «связей нет». Карточка без состояния контракта своей строки не получает вовсе — так же, как в списке окна (`contract::contract_word` отдаёт `None`), и слова за неё дверь не выдумывает.
                 Ok(door::Answer::Status(v)) => {
                     for line in door::status_lines(&v, &ctx.kit) {
@@ -412,13 +412,13 @@ fn run() -> Result<()> {
             println!("Записано {n} сумм в checksums.txt");
         }
         Cmd::Use { name } => use_connection(&ctx, name.as_deref())?,
-        Cmd::Code { card } => issue_code(card)?,
+        Cmd::Code { card } => issue_code(&ctx, card)?,
         Cmd::Dial { code, card } => dial(&ctx, code, card)?,
-        Cmd::Requests => show_requests()?,
-        Cmd::Allow { fingerprint, card } => answer_request(&fingerprint, card, door::Said::Allow)?,
-        Cmd::Decline { fingerprint, card } => answer_request(&fingerprint, card, door::Said::Deny)?,
-        Cmd::Peers { card } => show_peers(card)?,
-        Cmd::Revoke { fingerprint, card } => revoke_peer(card, fingerprint)?,
+        Cmd::Requests => show_requests(&ctx)?,
+        Cmd::Allow { fingerprint, card } => answer_request(&ctx, &fingerprint, card, door::Said::Allow)?,
+        Cmd::Decline { fingerprint, card } => answer_request(&ctx, &fingerprint, card, door::Said::Deny)?,
+        Cmd::Peers { card } => show_peers(&ctx, card)?,
+        Cmd::Revoke { fingerprint, card } => revoke_peer(&ctx, card, fingerprint)?,
     }
     Ok(())
 }
@@ -429,8 +429,8 @@ fn run() -> Result<()> {
 /// Выдаёт ВСЕГДА новый и гасит прежний — то же, что кнопка «Выдать новый код»: строки уже выданного кода нет нигде, кроме памяти живого,
 /// и показать её набранная команда не может (см. `door::Ask::Code`). Оговорка к «слепому» коду печатается ПЕРЕД самим кодом, видом
 /// находки (`[ !! ]`), как её печатают остальные подкоманды.
-fn issue_code(card: Option<String>) -> Result<()> {
-    let answer = door::ask(door::Ask::Code { card }).map_err(|e| anyhow::anyhow!("{e}"))?;
+fn issue_code(ctx: &Ctx, card: Option<String>) -> Result<()> {
+    let answer = door::ask(&ctx.kit, door::Ask::Code { card }).map_err(|e| anyhow::anyhow!("{e}"))?;
     let door::Answer::Code(issued) = answer else { anyhow::bail!("{}", door::WRONG_ANSWER) };
     let issued = issued.map_err(|e| anyhow::anyhow!("{e}"))?;
     if let Some(note) = issued.note {
@@ -449,7 +449,7 @@ fn issue_code(card: Option<String>) -> Result<()> {
 fn dial(ctx: &Ctx, code: String, card: Option<String>) -> Result<()> {
     let name = card.clone().unwrap_or_else(|| ctx.cfg.current().name.clone());
     println!("Подключаюсь по «{name}»; ответа ждём до {} минут — на той стороне вопрос задают человеку.", DIAL_MINUTES);
-    let answer = door::ask(door::Ask::Dial { code, card }).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let answer = door::ask(&ctx.kit, door::Ask::Dial { code, card }).map_err(|e| anyhow::anyhow!("{e}"))?;
     let door::Answer::Dialled(out) = answer else { anyhow::bail!("{}", door::WRONG_ANSWER) };
     let text = door::dialled_words(&name, &out.map_err(|e| anyhow::anyhow!("{e}"))?).map_err(|e| anyhow::anyhow!("{e}"))?;
     println!("{text}");
@@ -461,8 +461,8 @@ fn dial(ctx: &Ctx, code: String, card: Option<String>) -> Result<()> {
 /// «никто не просит», и человек на живом прогоне спокойно ждал бы звонка, на который уже некому ответить.
 ///
 /// Слова списка — в `door::request_lines` и только там: там же их проверяет тест.
-fn show_requests() -> Result<()> {
-    let answer = door::ask(door::Ask::Requests).map_err(|e| anyhow::anyhow!("{e}"))?;
+fn show_requests(ctx: &Ctx) -> Result<()> {
+    let answer = door::ask(&ctx.kit, door::Ask::Requests).map_err(|e| anyhow::anyhow!("{e}"))?;
     let door::Answer::Requests(list) = answer else { anyhow::bail!("{}", door::WRONG_ANSWER) };
     for line in door::request_lines(&list.map_err(|e| anyhow::anyhow!("{e}"))?) {
         println!("{line}");
@@ -478,9 +478,9 @@ fn show_requests() -> Result<()> {
 ///
 /// Слова исхода — у окна (`enroll::answered` через `door::answer_for`), второго словаря здесь нет. Не отдали ответ — это «не
 /// сделано»: причина названа, код возврата не ноль.
-fn answer_request(fingerprint: &str, card: Option<String>, said: door::Said) -> Result<()> {
+fn answer_request(ctx: &Ctx, fingerprint: &str, card: Option<String>, said: door::Said) -> Result<()> {
     let asked = door::Ask::Answer { fingerprint: fingerprint.to_string(), card, said };
-    let answer = door::ask(asked).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let answer = door::ask(&ctx.kit, asked).map_err(|e| anyhow::anyhow!("{e}"))?;
     let door::Answer::Done(said) = answer else { anyhow::bail!("{}", door::WRONG_ANSWER) };
     println!("{}", said.map_err(|e| anyhow::anyhow!("{e}"))?);
     Ok(())
@@ -492,9 +492,9 @@ fn answer_request(fingerprint: &str, card: Option<String>, said: door::Said) -> 
 ///
 /// Слова списка — в `door::peer_lines` и только там: там же их проверяет тест. Имя карточки едет туда же, чтобы пустой ответ знал, о
 /// чём спрашивали.
-fn show_peers(card: Option<String>) -> Result<()> {
+fn show_peers(ctx: &Ctx, card: Option<String>) -> Result<()> {
     let asked = card.clone();
-    let answer = door::ask(door::Ask::Peers { card }).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let answer = door::ask(&ctx.kit, door::Ask::Peers { card }).map_err(|e| anyhow::anyhow!("{e}"))?;
     let door::Answer::Peers(list) = answer else { anyhow::bail!("{}", door::WRONG_ANSWER) };
     for line in door::peer_lines(&list.map_err(|e| anyhow::anyhow!("{e}"))?, asked.as_deref()) {
         println!("{line}");
@@ -507,8 +507,8 @@ fn show_peers(card: Option<String>) -> Result<()> {
 ///
 /// Адрес — ПАРА: отпечаток и имя карточки, обе половины обязательны (`door::Ask::Revoke`, там довод целиком). Не отозвали — это «не
 /// сделано»: причина названа, код возврата не ноль, тем же правилом, что у `allow`.
-fn revoke_peer(card: String, fingerprint: String) -> Result<()> {
-    let answer = door::ask(door::Ask::Revoke { card, fingerprint }).map_err(|e| anyhow::anyhow!("{e}"))?;
+fn revoke_peer(ctx: &Ctx, card: String, fingerprint: String) -> Result<()> {
+    let answer = door::ask(&ctx.kit, door::Ask::Revoke { card, fingerprint }).map_err(|e| anyhow::anyhow!("{e}"))?;
     let door::Answer::Done(said) = answer else { anyhow::bail!("{}", door::WRONG_ANSWER) };
     println!("{}", said.map_err(|e| anyhow::anyhow!("{e}"))?);
     Ok(())
@@ -617,8 +617,17 @@ fn peer_wiring(ctx: &Ctx, requests: &enroll::Requests) -> (peer::Peer, session::
                     }
                     // Заявка кладётся в общий список — тот самый, который спрашивает управляющая дверь. Правило приёма (вытеснение
                     // повтора, очередь чужой стороны) живёт в `Requests::take`, одно на окно и на эту подкоманду.
+                    //
+                    // И о ней ГОВОРИТСЯ — обеими дорогами, какими здесь вообще говорят (Important 3 ревью всей работы): в консоль
+                    // (`sink`), потому что там и стоит ведущий живого прогона, и в журнал (`journal::say`), потому что книга
+                    // разговоров одна на окно и на бек — а уборка уже писала туда «заявка отменилась» про то, о чём никогда не
+                    // сообщали. Слова — у зачисления (`enroll::request_came`), те же самые, что печатает окно.
                     peer_out::Out::Enroll(p) => {
-                        requests.take(p);
+                        let name = p.request.card_name.clone();
+                        let queued = requests.take(p);
+                        let e = Event::Say(enroll::request_came(&name, queued));
+                        journal::say(&kit, &e);
+                        sink(e);
                     }
                     peer_out::Out::Flow(..) => {}
                 }
@@ -651,11 +660,22 @@ fn connect(ctx: &Ctx) -> Result<()> {
     // ветка себе запретила.
     let card = ctx.cfg.current().name.clone();
     let door = single_instance::acquire(&ctx.kit, false)?;
-    door.show(status_view(&card, &session::State::Off));
     // Межпроцессная часть замка проекта (`project::hold`): без этого вызова
     // файл не заводится, и второй долгоживущий процесс (другой редактор,
     // будущая подкоманда `mcp`) замка вовсе не увидит.
     project::set_lock_target(ctx.kit.state());
+    // Холодный замок готовности — тот же вердикт, те же слова и то же место
+    // по порядку, что у `serve` и у `gui::launch`: после замков, до того как
+    // поднято хоть что-нибудь. Прежде `connect` его не спрашивал вовсе и
+    // объявлял `serving: true` безусловно — а с задачи 9 это стало видно
+    // наружу: дверь говорила «обслуживаю», мост открывался, и агент получал
+    // отказ без причины (Minor 7 ревью всей работы). Довода, по которому
+    // `connect` был бы исключением, нет: обслуживает он ровно то же и ровно
+    // тем же.
+    if let Some(why) = gate::gate_now(&ctx.kit, &ctx.cfg) {
+        return Err(gate::refuse_to_serve(&ctx.kit, &why));
+    }
+    door.show(status_view(&card, &session::State::Off));
     // `connect` — такой же владелец сеанса, как окно (спека, «у сеанса один
     // владелец»), и признак разрешения на диске обязан сказать «on» здесь
     // же, иначе подкоманда `mcp` отказывала бы в каждом вызове при исправно

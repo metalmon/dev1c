@@ -63,6 +63,7 @@ use crate::secrets::hex;
 use crate::ticket::Ticket;
 use crate::wire::{code, BaseBrief, BaseFields, Ceiling, Frame, Msg, Refuse, SaysName, Side, Why};
 use iroh::EndpointId;
+use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
@@ -454,7 +455,8 @@ impl Pending {
 ///
 /// `Err` из `accept_side`/`dial_side` остаётся за тем, что разговором не
 /// является вовсе: оборванная связь, неразобравшийся кадр, не та версия.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Исход ездит и по управляющей двери (`door::Ask::Dial`), а не только внутри процесса: `1c-connect dial` ждёт его у ЖИВОГО экземпляра и читает теми же словами (задача 6 плана). Отсюда и serde — все три полезные нагрузки его уже умеют, они проводные.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Outcome {
     /// Разрешили сейчас: вот поля базы. В случае первом они приехали в
     /// `enroll_ok` — от той стороны, у которой база.
@@ -1545,6 +1547,41 @@ mod tests {
         assert_eq!(parties[0].says_name, "Разработчик", "как сторона себя назвала — её слова, кладутся как есть");
         assert!(parties[0].peer_write, "вместе с ключом записан потолок ТОЙ машины — та, что звонила, объявила его полным");
         assert!(spent(&book, &secret_of(&code)), "тикет погашен: после разрешения он не хранится нигде, и второй заявки по нему нет");
+    }
+
+    /// **Сгоревший код отвечается ПРИЧИНОЙ и не повторяется** (пункт 4 «на что смотреть» плана «Сопряжение переезжает в бек»; задача 6).
+    ///
+    /// Так выглядит второй круг по тому же коду: первый уже прошёл и погасил тикет (`Book::spend` — это и делает разрешение, см.
+    /// `two_nodes_enroll_each_other_end_to_end`), а человек набрал `1c-connect dial` с той же строкой ещё раз. Гашение здесь делается
+    /// прямо, а не вторым полным кругом: круг, который гасит, проверен соседним тестом, и повторять его ради того же факта значило бы
+    /// мерить дважды одно.
+    ///
+    /// Проверяется ИСХОД, а не `Err`: отказ произнесён, и зовущая сторона обязана его прочитать. Читает его `door::dialled_words` — те
+    /// самые слова, что увидит человек в консоли, — и читает «не сделано»: `Err`, то есть ненулевой код возврата. Повтора при этом не
+    /// идёт ниоткуда: `Round::NotEnrolled` круги прекращает (`channel::Stopped`), а набранная команда повторять за человека не берётся.
+    #[tokio::test]
+    async fn a_spent_code_is_answered_with_the_reason_and_not_retried() {
+        let (mine, theirs, _book, asked, _code) = talk(
+            "spent",
+            |book, _peer, base, _state| {
+                let ticket = Ticket::issue(base.id(), None, vec![]).unwrap();
+                book.issue(&"b1".into(), &ticket).unwrap();
+                let code = ticket.to_code();
+                book.spend(&secret_of(&code)).unwrap();
+                (code, vec![a_card("Ромашка", "b1", true)])
+            },
+            Decision::Allow,
+        )
+        .await;
+
+        assert_eq!(asked.count(), 0, "по сгоревшему коду человека не беспокоят вовсе — тикета в книге уже нет");
+        let Ok(out) = &mine else {
+            panic!("зовущая обязана прочитать отказ словами, а не получить обрыв: {mine:?}")
+        };
+        assert!(matches!(out, Outcome::NotEnrolled(_)), "это ИСХОД, а не несложившаяся связь: {out:?}");
+        let said = crate::door::dialled_words("Ромашка", out).expect_err("«не зачислены» — это «не сделано»");
+        assert!(said.contains("код одноразовый"), "человек читает ПРИЧИНУ, а не пустое «не вышло»: {said}");
+        assert!(matches!(theirs, Ok(Outcome::NotEnrolled(_))), "принимающая отказала и закрылась: {theirs:?}");
     }
 
     #[tokio::test]

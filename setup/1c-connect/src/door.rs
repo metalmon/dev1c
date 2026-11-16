@@ -14,7 +14,9 @@
 //!
 //! **Дверь не поднимает бека.** Клиент, не нашедший живого, говорит слова (`NO_BACK_END`) и уходит: иначе человек получил бы вторую, невидимую копию продукта — ровно то, что весь день 15.11 мешало открыть настоящее окно.
 //!
-//! Каким кодом уходить — дело КЛИЕНТА, а не двери, и клиенты тут разные. `status` без живого успешен (код 0): он напечатал состояние с диска, за которым человек и пришёл, а отсутствие живого — такое же сведение, как остальные его строки. Командам, которым дверь нужна по существу (`allow`, `decline` — задача 7 плана), отсутствие живого значит «сделать не удалось», и уходить им положено ненулевым кодом (решение ведущего, круг правок 2).
+//! Каким кодом уходить — дело КЛИЕНТА, а не двери, и клиенты тут разные. `status` без живого успешен (код 0): он напечатал состояние с диска, за которым человек и пришёл, а отсутствие живого — такое же сведение, как остальные его строки. Командам, которым дверь нужна по существу (`code` и `dial` — задача 6; `allow`, `decline` — задача 7 плана), отсутствие живого значит «сделать не удалось», и уходить им положено ненулевым кодом (решение ведущего, круг правок 2).
+//!
+//! **Дверь не только рассказывает, но и ДЕЛАЕТ** (задача 6). Снимок состояния она отдаёт сама, а всё остальное — исполнитель держателя (`Serves`, ставится `Door::answers`): у него ручка на живой узел и общий с окном запас выданных кодов, то есть ровно то, чего на диске нет. Исполнитель один на оба пути подъёма (`serves`), потому что клиенты у двери одни.
 
 use crate::single_instance::{current_user, guard_key};
 use crate::wire::{self, Frame};
@@ -42,16 +44,46 @@ pub const STRANGER_KNOCK: &str = "в управляющую дверь стуч�
 /// Сколько клиент ждёт ответа. Живой отвечает из памяти и мгновенно, так что срок здесь — не про скорость, а про то, чтобы зависший бек не держал набранную команду навсегда: `Frame::read` нарочно без своего срока (см. его докстроку), срок ставит вызывающий.
 const ASK_WAIT: Duration = Duration::from_secs(5);
 
-/// О чём клиент спрашивает живого. Задачи 6–9 плана добавят сюда свои случаи (`code`, `dial`, `requests`, `allow`, `decline`, `peers`, `revoke`); `Status` первый, потому что ничего не меняет.
+/// Сколько отмерено ЗВОНКУ — одно выражение на всех, кто его ждёт: сама дверь (`Ask::wait`), исполнитель у держателя (`dial_for`) и клиент. Звонок ждёт ЧЕЛОВЕКА у чужого экрана, и сроки у этого ожидания уже посчитаны зачислением: принимающая сторона отмеряет на решение `DECISION`, зовущая — его же плюс `PATIENCE` на саму пересылку (см. их докстроки). Второй меры тому же ожиданию здесь не заводим — она разошлась бы с первой при первой же правке сроков.
+const DIAL_WAIT: Duration = crate::enroll::DECISION.saturating_add(crate::enroll::PATIENCE);
+
+/// О чём клиент спрашивает живого. Задачи 7–9 плана добавят сюда свои случаи (`requests`, `allow`, `decline`, `peers`, `revoke`); `Status` первый, потому что ничего не меняет.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Ask {
     Status,
+    /// Выдать карточке новый код подключения. `card` — имя карточки; `None` — текущее соединение.
+    ///
+    /// Всегда перевыпуск, а не «показать»: строку уже выданного кода команда отдать не может — её нет нигде, кроме памяти живого (`codes::Codes`), и второй набранный `code` человек набирает ровно затем, зачем нажимает «Выдать новый код» в окне. Прежние коды карточки при этом гаснут (`Book::reissue`), и это то же самое правило, что на экране.
+    Code {
+        card: Option<String>,
+    },
+    /// Позвонить по коду и ДОЖДАТЬСЯ исхода. `card` — имя зовущей карточки; `None` — текущее соединение.
+    Dial {
+        code: String,
+        card: Option<String>,
+    },
+}
+
+impl Ask {
+    /// Сколько ждут ответа на ЭТОТ вопрос — мера одна на обе стороны двери: клиент и держатель отмеряют её по одному выражению, и разойтись им негде.
+    ///
+    /// **Звонок — особый, и не на вкус.** Он ждёт ЧЕЛОВЕКА у чужого экрана: принимающая сторона отмеряет на решение `enroll::DECISION`, зовущая — его же плюс `PATIENCE` (см. их докстроки), и пять секунд обычного вопроса обрывали бы разговор ровно там, где человек тянется к мыши. Клиент ждёт на `ASK_WAIT` дольше держателя нарочно: срок разговора кончится у того, кто его ведёт, и ответ словами успеет доехать — иначе человек в консоли получил бы наше «молчит дольше» вместо настоящей причины.
+    fn wait(&self) -> Duration {
+        match self {
+            Ask::Status | Ask::Code { .. } => ASK_WAIT,
+            Ask::Dial { .. } => DIAL_WAIT,
+        }
+    }
 }
 
 /// Что живой отвечает. Случай на случай с `Ask`: вопрос без ответа и ответ без вопроса этой дверью не ходят.
+///
+/// **Отказ САМОГО дела едет внутрь ответа, а не наружу `Result`.** Наружный отказ `ask` — про дверь: живого нет, дверь чужая, не ответил. «Такой карточки нет», «код выдавать некому», «по этому коду подключиться нельзя» — это ответы живого, он их и произносит; смешать их в один `Result` значило бы, что команда не отличит «бек не запущен» от «бек ответил отказом», а человеку это разные беды.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Answer {
     Status(StatusView),
+    Code(Result<crate::codes::Issued, String>),
+    Dialled(Result<crate::enroll::Outcome, String>),
 }
 
 /// То, что о себе рассказывает живой экземпляр, и ТОЛЬКО это: обслуживает ли он сейчас и что со связью по карточкам. Ни одного поля про запас — задача 9 дополнит вид, когда `status` правда начнёт печатать больше; дополнять пустое дешевле, чем выпиливать лишнее.
@@ -74,10 +106,16 @@ pub struct CardState {
     pub word: String,
 }
 
+/// Что живой УМЕЕТ, а не только рассказывает. Ставится держателем (`Door::answers`) и зовётся на каждый вопрос, кроме `Status`: тот дверь отвечает из своего снимка сама.
+///
+/// Обычное замыкание, а не трейт: исполнитель один на оба пути подъёма (`door::serves`), и интерфейс с единственной реализацией был бы лишним этажом. `Send + Sync` — потому что зовут его из потока приёма, а ставит главный.
+pub type Serves = Arc<dyn Fn(Ask) -> Answer + Send + Sync>;
+
 /// Сторона бека: держит приём, пока жива. Клонируется ручкой на ту же дверь — держателю нужно и оставить её на стеке, и отдать копию в замыкание, которое рассказывает ей о новостях (`show`).
 #[derive(Clone)]
 pub struct Door {
     view: Arc<Mutex<StatusView>>,
+    serves: Arc<Mutex<Option<Serves>>>,
 }
 
 impl Door {
@@ -87,8 +125,23 @@ impl Door {
         *self.view.lock().unwrap_or_else(|e| e.into_inner()) = view;
     }
 
+    /// Научить дверь ДЕЛАТЬ, а не только рассказывать. Ставится один раз, когда у держателя появился узел: до того отвечать на `code` и `dial` ему нечем, и он честно говорит об этом словами (`peer::NOT_READY`), а не молчит.
+    ///
+    /// Отдельно от `open` ровно по этой причине: дверь открывается ПЕРВЫМ делом, раньше узла и сеанса (иначе `status` читал бы «бек не запущен» у живого бека), а узел поднимается потоком и не мгновенно.
+    pub fn answers(&self, serves: Serves) {
+        *self.serves.lock().unwrap_or_else(|e| e.into_inner()) = Some(serves);
+    }
+
     fn snapshot(&self) -> StatusView {
         self.view.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn doer(&self) -> Option<Serves> {
+        self.serves.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn new() -> Door {
+        Door { view: Arc::new(Mutex::new(StatusView::default())), serves: Arc::new(Mutex::new(None)) }
     }
 }
 
@@ -104,6 +157,59 @@ pub fn status_lines(v: &StatusView) -> Vec<String> {
         Some(cards) => out.extend(cards.iter().map(|c| format!("  {:<16} {}", c.name, c.word))),
     }
     out
+}
+
+/// Живой экземпляр ответил не на тот вопрос. Беда проводки, а не человека, но молчать о ней нельзя: случай говорит, что по эту и ту сторону двери разные сборки программы.
+pub const WRONG_ANSWER: &str = "живой экземпляр ответил не на тот вопрос — похоже, он другой версии; остановите его и запустите снова";
+
+/// Что живой УМЕЕТ — одно место на оба пути подъёма (`gui::launch` и `fn serve` в сборке без окна): клиенты у двери одни, и делать по их вопросам положено одно и то же.
+///
+/// Берёт ровно то, чего нет на диске: ручку на живой узел и общий запас выданных кодов. Настройки, наоборот, читаются с диска на каждый вопрос — правда про соединения живёт в файле, и человек правит его при живом беке.
+pub fn serves(kit: Kit, peer: crate::peer::Peer, codes: crate::codes::Codes) -> Serves {
+    Arc::new(move |q| match q {
+        // Снимок отдаёт сама дверь (`reply`), сюда `Status` не доходит; умолчание здесь — «ничего не знаю», и выдумывать за дверь нечего.
+        Ask::Status => Answer::Status(StatusView::default()),
+        Ask::Code { card } => Answer::Code(issue_for(&kit, &peer, &codes, card.as_deref())),
+        Ask::Dial { code, card } => Answer::Dialled(dial_for(&kit, &peer, &code, card.as_deref())),
+    })
+}
+
+/// Настройки соединений — с ДИСКА на каждый вопрос, а не из памяти держателя: правда про соединения живёт в файле, и человек правит его при живом беке.
+fn settings(kit: &Kit) -> Result<crate::cfg::Cfg, String> {
+    crate::cfg::Cfg::load_unchecked(kit).map_err(|e| format!("Настройки соединений не прочитались: {e:#}"))
+}
+
+/// Имя карточки, о которой спрашивают, — названное либо текущее соединение.
+fn named(cfg: &crate::cfg::Cfg, card: Option<&str>) -> String {
+    card.map_or_else(|| cfg.current().name.clone(), str::to_string)
+}
+
+fn issue_for(kit: &Kit, peer: &crate::peer::Peer, codes: &crate::codes::Codes, card: Option<&str>) -> Result<crate::codes::Issued, String> {
+    let cfg = settings(kit)?;
+    crate::codes::issue(kit, &cfg, Some(peer), codes, &named(&cfg, card), true)
+}
+
+/// Позвонить и ДОЖДАТЬСЯ исхода (решение ведущего: человеку в консоли нужен ответ, а не обещание).
+///
+/// Срок — тот же `DIAL_WAIT`, которым отмеряет этот вопрос и сама дверь: ждать дольше нечего (на той стороне к этому времени кончился срок решения), а меньше значило бы бросить трубку раньше человека у чужого экрана.
+fn dial_for(kit: &Kit, peer: &crate::peer::Peer, code: &str, card: Option<&str>) -> Result<crate::enroll::Outcome, String> {
+    let cfg = settings(kit)?;
+    let name = named(&cfg, card);
+    let key = cfg.by_name(&name).map(crate::cfg::Connection::id).ok_or_else(|| crate::codes::gone(&name))?;
+    peer.dial_waiting(&key, &name, code)?
+        .recv_timeout(DIAL_WAIT)
+        .map_err(|_| format!("«{name}»: ответа так и не было. Проверьте, запущена ли программа на том компьютере, и позвоните снова."))?
+}
+
+/// Исход звонка СЛОВАМИ. `Err` — «не сделано»: команда называет причину и уходит ненулевым кодом (решение ведущего; у `status` это не так — он печатает то, за чем пришли).
+///
+/// Слова берутся у ЗАЧИСЛЕНИЯ и нигде не сочиняются: отказ уже произнесён той стороной (`Refuse::text`), и второй словарь исходов — ровно то, против чего эта ветка и воюет. Своё здесь одно — имя карточки впереди, тем же видом, каким о ней говорит журнал окна.
+pub fn dialled_words(card: &str, o: &crate::enroll::Outcome) -> Result<String, String> {
+    match o {
+        crate::enroll::Outcome::Enrolled(base) => Ok(format!("«{card}»: подключено, {}", crate::peer::access_word(base.write))),
+        crate::enroll::Outcome::Already(base) => Ok(format!("«{card}»: подключено, {}", crate::peer::access_word(base.write))),
+        crate::enroll::Outcome::NotEnrolled(no) => Err(format!("«{card}»: {}", no.text)),
+    }
 }
 
 /// Имя двери — единственное место, где оно строится (тот же довод, что у `single_instance::instance_mutex_name`: вторая формулировка смотрела бы не на тот объект). Ключ — `guard_key`, тот же, что у замка.
@@ -145,16 +251,45 @@ fn runtime() -> io::Result<tokio::runtime::Runtime> {
 }
 
 /// Ответ на один стук. Разговор — ровно один вопрос и ровно один ответ: держать канал открытым между вопросами нечего, а закрытый канал на той стороне `Frame::read` отличает от обрыва словами (`code::CLOSED`).
+///
+/// Сроки здесь двое и разные. Вопроса ждём `ASK_WAIT`: открывший канал и замолчавший иначе запер бы экземпляр канала навсегда (`Frame::read` нарочно без своего срока). Самого дела ждём столько, сколько оно бывает (`Ask::wait`) — звонок ждёт человека у чужого экрана и в пять секунд не укладывается никогда.
 async fn answer<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, door: &Door) {
-    let q: Ask = match Frame::read(stream).await {
-        Ok(q) => q,
+    let q: Ask = match tokio::time::timeout(ASK_WAIT, Frame::read(stream)).await {
+        Ok(Ok(q)) => q,
         // Молчание и мусор в дверь — не событие для человека: стукнуть в неё может что угодно, а отвечать мы умеем только своим.
-        Err(_) => return,
+        _ => return,
     };
-    let a = match q {
-        Ask::Status => Answer::Status(door.snapshot()),
+    let Ok(a) = tokio::time::timeout(q.wait(), reply(door, q)).await else {
+        // Срок дела вышел — отвечать нечем, и клиент скажет об этом своими словами (его срок на `ASK_WAIT` длиннее, см. `Ask::wait`).
+        return;
     };
     let _ = Frame::write(stream, &a).await;
+}
+
+/// Что отвечает на вопрос. `Status` — сама дверь из своего снимка: он лежит в ней, и спрашивать его у держателя не у кого. Остальное делает исполнитель держателя (`Serves`), а его ещё может не быть — узел поднимается не мгновенно, и тогда человеку говорится то же самое, что говорит окно в ту же щель.
+async fn reply(door: &Door, q: Ask) -> Answer {
+    if matches!(q, Ask::Status) {
+        return Answer::Status(door.snapshot());
+    }
+    // Живой есть, а делать ещё нечем: узел поднимается потоком и не мгновенно. Слова — общие с окном (`peer::NOT_READY`), второго текста на тот же случай не заводим.
+    let Some(doer) = door.doer() else { return refused(&q, crate::peer::NOT_READY.to_string()) };
+    let asked = q.clone();
+    // Отдельным потоком блокирующих задач: дело ЖДЁТ (звонок — до пяти с половиной минут), а рантайм двери однопоточный — заняв его собой, звонок запер бы и соседний `status`.
+    match tokio::task::spawn_blocking(move || (doer)(q)).await {
+        Ok(a) => a,
+        // Исполнитель запаниковал. Сказать нечего, кроме правды: дело не сделано, а причина — в журнале, куда паника и легла.
+        Err(_) => refused(&asked, "живой экземпляр не справился с командой — что случилось, сказано в его журнале".into()),
+    }
+}
+
+/// Отказ САМОГО дела — тем видом ответа, которого вопрос ждёт. Вид не выдумывается: ответ без своего вопроса этой дверью не ходит, и клиент, получивший чужой вид, прочёл бы `WRONG_ANSWER` там, где ему сказали дело.
+fn refused(q: &Ask, why: String) -> Answer {
+    match q {
+        // Снимок у `Status` отвечает сама дверь, и до сюда он не доходит; умолчание здесь — «ничего не знаю», и это честнее выдуманного.
+        Ask::Status => Answer::Status(StatusView::default()),
+        Ask::Code { .. } => Answer::Code(Err(why)),
+        Ask::Dial { .. } => Answer::Dialled(Err(why)),
+    }
 }
 
 /// Слова на отказ самого разговора.
@@ -188,7 +323,7 @@ fn sock_path(name: &str, kit: &Kit) -> std::path::PathBuf {
 
 /// Приём — своим потоком со своим рантаймом (тот же приём и та же причина, что у узла и сеанса, см. `peer.rs`): у окна главный поток занят GPUI, а у `serve` — ожиданием Ctrl+C, и ждать стука там нельзя ни тому, ни другому.
 ///
-/// Стуки обслуживаются ПО ОДНОМУ. ponytail: клиентов у двери столько, сколько команд человек набрал руками, а ответ — копия снимка из памяти; потолок — очередь на время одного ответа, и поднимать её в задачу на стук незачем. Срок на разговор при этом обязателен: клиент, открывший канал и замолчавший, иначе запер бы дверь навсегда (`Frame::read` нарочно без своего срока).
+/// Каждый стук — своей задачей, и потолок «очередь на время одного ответа» снят задачей 6 вместе с поводом так считать: ответом перестал быть один снимок из памяти. `dial` ждёт человека у чужого экрана до пяти с половиной минут (`Ask::wait`), и обслуживай дверь стуки по очереди — набранный рядом `status` всё это время читал бы «бек не запущен» при живом беке. Сроки на разговор остаются и теперь их двое — см. `answer`.
 #[cfg(windows)]
 fn open_at(name: &str, _kit: &Kit) -> io::Result<Door> {
     let path = pipe_path(name);
@@ -200,7 +335,7 @@ fn open_at(name: &str, _kit: &Kit) -> io::Result<Door> {
         let _in_rt = rt.enter();
         pipe(&path, &rights, true)?
     };
-    let door = Door { view: Arc::new(Mutex::new(StatusView::default())) };
+    let door = Door::new();
     let mine = door.clone();
     std::thread::spawn(move || {
         rt.block_on(async move {
@@ -211,7 +346,8 @@ fn open_at(name: &str, _kit: &Kit) -> io::Result<Door> {
                 // Следующий экземпляр канала — сразу: имя обязано остаться занятым, пока мы заняты этим стуком, иначе клиент, пришедший в эту долю секунды, прочёл бы «бек не запущен» при живом беке.
                 let Ok(next) = pipe(&path, &rights, false) else { return };
                 let mut taken = std::mem::replace(&mut server, next);
-                let _ = tokio::time::timeout(ASK_WAIT, answer(&mut taken, &mine)).await;
+                let mine = mine.clone();
+                tokio::spawn(async move { answer(&mut taken, &mine).await });
             }
         })
     });
@@ -309,7 +445,7 @@ fn open_at(name: &str, kit: &Kit) -> io::Result<Door> {
     //
     // ponytail: между `bind` и этой строкой сокет недолго живёт с правами по умолчанию (umask), и в эту щель чужой успел бы соединиться. Закрыта она не здесь, а `peer_is_ours` на приёме: uid пришедшего сверяется с нашим на КАЖДЫЙ стук. Снимать щель заранее нечем — `umask` общий на процесс, и трогать его ради одного файла значило бы править чужие.
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-    let door = Door { view: Arc::new(Mutex::new(StatusView::default())) };
+    let door = Door::new();
     let mine = door.clone();
     let kit = kit.clone();
     std::thread::spawn(move || {
@@ -321,7 +457,8 @@ fn open_at(name: &str, kit: &Kit) -> io::Result<Door> {
                     crate::journal::write(&kit, crate::journal::Kind::Fail, STRANGER_KNOCK);
                     continue;
                 }
-                let _ = tokio::time::timeout(ASK_WAIT, answer(&mut taken, &mine)).await;
+                let mine = mine.clone();
+                tokio::spawn(async move { answer(&mut taken, &mine).await });
             }
         })
     });
@@ -414,14 +551,15 @@ fn ask_at(name: &str, kit: &Kit, q: Ask) -> Result<Answer, String> {
         })?;
         // До первого же сказанного слова: вопрос чужому — это уже утечка (а с задачи 7 плана по этой двери поедет разрешение человека).
         server_is_ours(&stream)?;
+        // Ждём РОВНО столько, сколько живому отмерено на это дело, плюс обычный срок на сам обмен (`Ask::wait`): уйди клиент раньше, человек прочёл бы наше «молчит» вместо настоящей причины, которую живой как раз дописывает.
+        let waiting = q.wait() + ASK_WAIT;
         Frame::write(&mut stream, &q).await.map_err(|r| not_answered(&r))?;
-        match tokio::time::timeout(ASK_WAIT, Frame::read::<_, Answer>(&mut stream)).await {
+        match tokio::time::timeout(waiting, Frame::read::<_, Answer>(&mut stream)).await {
             Ok(Ok(a)) => Ok(a),
             Ok(Err(r)) => Err(not_answered(&r)),
-            Err(_) => Err(format!(
-                "живой экземпляр молчит дольше {} с: он занят или завис — остановите его и запустите снова",
-                ASK_WAIT.as_secs()
-            )),
+            Err(_) => {
+                Err(format!("живой экземпляр молчит дольше {} с: он занят или завис — остановите его и запустите снова", waiting.as_secs()))
+            }
         }
     })
 }
@@ -561,6 +699,94 @@ mod tests {
         let got = got.expect("дверь чужого процесса не ответила");
         assert!(got.serving, "ответил тот, кто дверь открыл, а не умолчание");
         assert_eq!(got.cards.as_deref().unwrap_or_default().len(), 1, "снимок доехал между процессами целиком: {got:?}");
+    }
+
+    /// Исполнитель-декорация: отвечает заданным наперёд и, если велено, не спеша. Настоящий (`door::serves`) требует живого узла, а эти меры — про саму дверь: доедут ли `code` и `dial` туда и обратно и не запирает ли долгий вопрос дверь для соседнего.
+    fn a_doer(a: Answer, slow: Duration) -> Serves {
+        Arc::new(move |_| {
+            std::thread::sleep(slow);
+            a.clone()
+        })
+    }
+
+    fn an_outcome() -> crate::enroll::Outcome {
+        crate::enroll::Outcome::Already(wire::BaseBrief { id: "b1".into(), write: true })
+    }
+
+    /// `code` и `dial` ездят дверью целиком — и значением, а не фактом ответа: кадр двери возит исход зачисления и выданный код со всей оговоркой, и подменённое поле здесь было бы видно.
+    #[test]
+    fn code_and_dial_ride_the_door_there_and_back() {
+        let (_dir, kit) = kit_for_test();
+        let name = test_door("doing");
+        let door = open_at(&name, &kit).expect("дверь открылась");
+        let issued = crate::codes::Issued { code: "код".into(), note: Some("оговорка".into()) };
+        door.answers(a_doer(Answer::Code(Ok(issued.clone())), Duration::ZERO));
+        match ask_at(&name, &kit, Ask::Code { card: Some("Ромашка".into()) }) {
+            Ok(Answer::Code(Ok(got))) => assert_eq!(got, issued, "код и оговорка доехали целиком"),
+            other => panic!("живой обязан ответить выдачей: {other:?}"),
+        }
+        door.answers(a_doer(Answer::Dialled(Ok(an_outcome())), Duration::ZERO));
+        match ask_at(&name, &kit, Ask::Dial { code: "код".into(), card: None }) {
+            Ok(Answer::Dialled(Ok(got))) => assert_eq!(got, an_outcome(), "исход зачисления доехал тем же значением"),
+            other => panic!("живой обязан ответить исходом: {other:?}"),
+        }
+    }
+
+    /// **Долгий вопрос не запирает дверь.** `dial` ждёт человека у чужого экрана минутами (`DIAL_WAIT`), и обслуживай дверь стуки по очереди — набранный рядом `status` всё это время читал бы «бек не запущен» при живом беке. Мера на том и стоит: `status` отвечает, ПОКА звонок ещё идёт.
+    #[test]
+    fn a_long_question_does_not_lock_the_door_for_the_next_one() {
+        let (_dir, kit) = kit_for_test();
+        let name = test_door("busy");
+        let door = open_at(&name, &kit).expect("дверь открылась");
+        door.show(StatusView { serving: true, cards: Some(vec![]) });
+        door.answers(a_doer(Answer::Dialled(Ok(an_outcome())), Duration::from_secs(2)));
+        let (slow_name, slow_kit) = (name.clone(), kit.clone());
+        let slow = std::thread::spawn(move || ask_at(&slow_name, &slow_kit, Ask::Dial { code: "код".into(), card: None }));
+        // Не сон на глазок: ждём, пока медленный стук правда дойдёт до исполнителя, и только потом спрашиваем состояние.
+        std::thread::sleep(Duration::from_millis(300));
+        let quick = std::time::Instant::now();
+        let Ok(Answer::Status(v)) = ask_at(&name, &kit, Ask::Status) else {
+            panic!("состояние обязано отвечать, пока идёт звонок")
+        };
+        assert!(v.serving, "ответил держатель, а не умолчание");
+        assert!(quick.elapsed() < Duration::from_secs(1), "состояние ждало конца звонка: {:?}", quick.elapsed());
+        assert!(matches!(slow.join().expect("поток звонка"), Ok(Answer::Dialled(Ok(_)))), "и сам звонок договорил");
+    }
+
+    /// Дверь открыта, а делать ещё нечем: узел поднимается не мгновенно. Отказ — СЛОВАМИ, и теми же, что говорит окно в ту же щель (`peer::NOT_READY`), и приезжает он тем видом ответа, которого вопрос ждёт.
+    #[test]
+    fn a_door_without_a_doer_refuses_in_the_same_words_as_the_window() {
+        let (_dir, kit) = kit_for_test();
+        let name = test_door("notready");
+        let _door = open_at(&name, &kit).expect("дверь открылась");
+        let Ok(Answer::Code(Err(why))) = ask_at(&name, &kit, Ask::Code { card: None }) else {
+            panic!("отказ обязан приехать видом выдачи, а не чужим")
+        };
+        assert_eq!(why, crate::peer::NOT_READY);
+        let Ok(Answer::Dialled(Err(why))) = ask_at(&name, &kit, Ask::Dial { code: "к".into(), card: None }) else {
+            panic!("отказ обязан приехать видом звонка")
+        };
+        assert_eq!(why, crate::peer::NOT_READY);
+    }
+
+    /// Звонок ждут дольше обычного вопроса, и не на вкус: разговор зачисления отмеряет человеку у чужого экрана минуты, и пять секунд обрывали бы его ровно там, где он тянется к мыши.
+    #[test]
+    fn a_call_is_waited_for_longer_than_a_question() {
+        assert_eq!(Ask::Status.wait(), ASK_WAIT);
+        assert_eq!(Ask::Code { card: None }.wait(), ASK_WAIT);
+        let dial = Ask::Dial { code: String::new(), card: None }.wait();
+        assert_eq!(dial, crate::enroll::DECISION + crate::enroll::PATIENCE, "мера звонка — та же, что у самого разговора");
+        assert!(dial > ASK_WAIT, "иначе звонок обрывался бы раньше, чем человек на той стороне успеет решить");
+    }
+
+    /// Исход звонка словами: зачислили — успех, отказали — «не сделано» с ПРИЧИНОЙ. Слова берутся у зачисления (`Refuse::text`) и здесь не сочиняются: второй словарь исходов — ровно то, против чего эта ветка и воюет.
+    #[test]
+    fn the_outcome_of_a_call_is_said_in_the_words_of_enrolment() {
+        let up = dialled_words("Ромашка", &an_outcome()).expect("зачислённый возврат — успех");
+        assert!(up.contains("Ромашка") && up.contains("подключено"), "{up}");
+        let no = crate::enroll::Outcome::NotEnrolled(wire::Refuse::new(wire::code::TICKET_SPENT, "Код устарел.\nСовсем.\nВыдайте новый."));
+        let said = dialled_words("Ромашка", &no).expect_err("незачисление — это «не сделано», и код возврата не ноль");
+        assert!(said.contains("Код устарел"), "причина — словами той стороны, а не нашим пересказом: {said}");
     }
 
     /// «О связи пока не сообщает» и «связей нет» — РАЗНЫЕ слова человеку, а не одна пустота на оба случая. Тест и держит это различие: пропади оно, `status` отвечал бы молчанием там, где обязан отвечать словами.

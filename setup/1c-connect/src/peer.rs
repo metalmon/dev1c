@@ -79,7 +79,9 @@ pub struct Peer {
 enum Cmd {
     /// Позвонить зовущей карточкой. Пустой `code` — переподключение по
     /// запомненному партнёру (`Partners`), непустой — первая заявка.
-    Dial { card: CardId, name: String, code: String },
+    ///
+    /// `told` — кому рассказать исход первого круга (см. `Told`). Пусто — никому: так звонит окно и так звонят карточки, которые зовут сами при запуске.
+    Dial { card: CardId, name: String, code: String, told: Told },
     /// Увести местное соединение агента В КАНАЛ — к той стороне, где база (шаг 4 плана пары B).
     ///
     /// Приходит от местного слушателя (`listen::run`): Zed подключился к нашему порту, а база не здесь. Поток узла открывает поток в
@@ -124,6 +126,36 @@ enum Cmd {
 /// связи нет.
 pub const NO_NODE: &str = "поток узла не работает — вызовы агента вести некуда";
 
+/// Узла ещё нет вовсе — программа только поднимается. Слова ОДНИ на оба места, где этот случай встречается человеку: щелчок «Подключиться» в окне до подъёма узла (`gui::panel::dial_card`) и стук в управляющую дверь в ту же щель (`door::serves` ещё не поставлен).
+pub const NOT_READY: &str = "Программа ещё не готова подключаться — попробуйте через минуту.";
+
+/// Кому рассказать исход ПЕРВОГО круга звонка — и ровно один раз.
+///
+/// Нужен он тому, кто набрал `1c-connect dial` и ждёт ответа в консоли (решение ведущего, задача 6: «ждёт исхода и печатает его словами, а не возвращается сразу»). Окну он не нужен: там исход виден строкой журнала и состоянием карточки, и `Peer::dial` его не заводит вовсе.
+///
+/// **Только ПЕРВЫЙ круг, и это не упрощение.** `channel::keep_calling` повторяет недозвон годами с нарастающей паузой (и правильно делает: сервер заказчика бывает выключен на ночь), а человек в консоли ждёт ответа сейчас. `Option::take` и есть «один раз»: второй круг находит `None` и никому ничего не шлёт, а повторы идут дальше своим чередом — сказанное человеку их не отменяет и не ускоряет.
+///
+/// `std::sync::mpsc`, а не `oneshot`: ждёт его поток управляющей двери, у которого своего рантайма нет, и ждать он умеет только по-настоящему, со сроком (тот же довод, что у `Cmd::ByeAll`).
+/// Исход звонка словами — то, чего ждёт набравший `dial`. `Err` — связи не вышло вовсе (негодный код, недозвон); отказ зачисления сюда не попадает, он ИСХОД (`Outcome::NotEnrolled`).
+pub type Dialled = Result<enroll::Outcome, String>;
+
+#[derive(Clone, Default)]
+pub struct Told(Arc<Mutex<Option<std::sync::mpsc::Sender<Dialled>>>>);
+
+impl Told {
+    /// Рассказать исход — первому, кто спросил, и больше никому.
+    fn tell(&self, out: &Dialled) {
+        if let Some(tx) = self.0.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = tx.send(out.clone());
+        }
+    }
+
+    /// Круг не дошёл до разговора вовсе — негодный код, нет адреса, канал не открылся. Для ждущего это такой же ответ, как отказ: `Err` зачисления и значит «связи не вышло», а причина названа словами.
+    fn failed(&self, why: &str) {
+        self.tell(&Err(why.to_string()));
+    }
+}
+
 impl Peer {
     /// Как нас найти — для кода подключения. `None` — узел ещё не поднялся
     /// или не вышел в сеть; код тогда выдаётся без адресов, как и до этой
@@ -135,8 +167,18 @@ impl Peer {
     /// Позвонить карточкой. Отказ — только «поток узла кончился», то есть
     /// случай, в котором звонить нечем вовсе.
     pub fn dial(&self, card: &CardId, name: &str, code: &str) -> Result<(), String> {
+        self.ring(card, name, code, Told::default())
+    }
+
+    /// То же самое, но с обратной дорогой: получивший приёмник дождётся исхода первого круга словами (`Told`). Так звонит набранный `1c-connect dial` — человеку в консоли нужен ответ, а не обещание (решение ведущего, задача 6).
+    pub fn dial_waiting(&self, card: &CardId, name: &str, code: &str) -> Result<std::sync::mpsc::Receiver<Dialled>, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.ring(card, name, code, Told(Arc::new(Mutex::new(Some(tx))))).map(|()| rx)
+    }
+
+    fn ring(&self, card: &CardId, name: &str, code: &str, told: Told) -> Result<(), String> {
         self.cmd
-            .send(Cmd::Dial { card: card.clone(), name: name.to_string(), code: code.to_string() })
+            .send(Cmd::Dial { card: card.clone(), name: name.to_string(), code: code.to_string(), told })
             .map_err(|_| "Программа не вышла в сеть — подключиться нечем. Перезапустите её.".to_string())
     }
 
@@ -243,15 +285,26 @@ async fn serve(
             let names = card_names(&kit);
             for (card, _) in partners.all() {
                 let name = names.get(&card).cloned().unwrap_or_else(|| card.to_string());
-                start_call(&node, &channels, &kit, &tx, &live, &serves, &mut calls, Dialling { id: card, name }, String::new());
+                start_call(
+                    &node,
+                    &channels,
+                    &kit,
+                    &tx,
+                    &live,
+                    &serves,
+                    &mut calls,
+                    Dialling { id: card, name },
+                    String::new(),
+                    Told::default(),
+                );
             }
         }
         Err(e) => say(&tx, common::Event::Fail(e)),
     }
     while let Some(cmd) = cmds.recv().await {
         match cmd {
-            Cmd::Dial { card, name, code } => {
-                start_call(&node, &channels, &kit, &tx, &live, &serves, &mut calls, Dialling { id: card, name }, code)
+            Cmd::Dial { card, name, code, told } => {
+                start_call(&node, &channels, &kit, &tx, &live, &serves, &mut calls, Dialling { id: card, name }, code, told)
             }
             Cmd::Calls { card, kind, stream, done } => {
                 let (kit, tx, channels) = (kit.clone(), tx.clone(), channels.clone());
@@ -525,10 +578,13 @@ fn start_call(
     calls: &mut HashMap<CardId, tokio::task::JoinHandle<()>>,
     card: Dialling,
     code: String,
+    told: Told,
 ) {
     let addr = match target(kit, &card.id, &code) {
         Ok(addr) => addr,
         Err(e) => {
+            // Ждущему в консоли — та же причина и сразу: негодный код разбирается ЗДЕСЬ (`Ticket::from_code`), до всякого разговора, и молчать о нём значило бы держать человека полный срок ожидания ответа, которого не будет.
+            told.failed(&e);
             say(tx, common::Event::Fail(e));
             return;
         }
@@ -537,8 +593,18 @@ fn start_call(
         old.abort();
     }
     let id = card.id.clone();
-    let handle =
-        tokio::spawn(calling(node.clone(), channels.clone(), kit.clone(), tx.clone(), live.clone(), serves.clone(), card, code, addr));
+    let handle = tokio::spawn(calling(
+        node.clone(),
+        channels.clone(),
+        kit.clone(),
+        tx.clone(),
+        live.clone(),
+        serves.clone(),
+        card,
+        code,
+        addr,
+        told,
+    ));
     calls.insert(id, handle);
 }
 
@@ -656,6 +722,7 @@ async fn calling(
     card: Dialling,
     code: String,
     addr: EndpointAddr,
+    told: Told,
 ) {
     flow(&tx, &card.id, Some(Flow::Calling));
     let hand = Arc::new(Mutex::new(InHand { code, card: known_card(&kit, &card.id) }));
@@ -671,12 +738,12 @@ async fn calling(
         let (node, channels, kit, tx, card, addr, hand) =
             (node.clone(), channels.clone(), kit.clone(), tx.clone(), card.clone(), addr.clone(), hand.clone());
         let (live, serves) = (live.clone(), serves.clone());
-        let said = said.clone();
+        let (said, told) = (said.clone(), told.clone());
         async move {
             // Замок берётся и отпускается до первого ожидания — через `await`
             // его не держим ни разу.
             let mine = hand.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            let (round, agreed) = one_round(&node, &channels, &kit, &tx, &live, &serves, &card, addr, mine.call()).await;
+            let (round, agreed) = one_round(&node, &channels, &kit, &tx, &live, &serves, &card, addr, mine.call(), &told).await;
             {
                 let mut last = said.lock().unwrap_or_else(|e| e.into_inner());
                 match &round {
@@ -722,6 +789,7 @@ async fn one_round(
     card: &Dialling,
     addr: EndpointAddr,
     call: enroll::Call<'_>,
+    told: &Told,
 ) -> (Round, Option<crate::wire::CardRef>) {
     let note = |tx: &UnboundedSender<Out>, text: Option<String>| {
         if let Some(t) = text {
@@ -731,12 +799,18 @@ async fn one_round(
     note(tx, crate::debug::step(|| format!("«{}»: звоню на {}", card.name, crate::enroll::short_key(&addr.id.to_string()))));
     let channel = match channels.to(node, addr.clone()).await {
         Ok(c) => c,
-        Err(e) => return (Round::Failed(e), None),
+        Err(e) => {
+            told.failed(&e);
+            return (Round::Failed(e), None);
+        }
     };
     note(tx, crate::debug::step(|| format!("«{}»: канал открыт, открываю управляющий поток", card.name)));
     let mut control = match channel.call().await {
         Ok(c) => c,
-        Err(e) => return (Round::Failed(e), None),
+        Err(e) => {
+            told.failed(&e);
+            return (Round::Failed(e), None);
+        }
     };
     // **Кем выходим на провод и есть ли что сказать о базе** — решает сочетание этой карточки (`cfg::Combo::side`), а не
     // привычка: в паре A здесь агенты и база у принимающей, в паре B база ЗДЕСЬ, и её поля — единственное, откуда та сторона их
@@ -772,6 +846,8 @@ async fn one_round(
         _ => (None, false),
     };
     note(tx, crate::debug::step(|| format!("«{}»: ответ зачисления: {out:?}", card.name)));
+    // Ждущему в консоли — ЗДЕСЬ, а не на выходе из круга: `Round::Held` возвращается лишь когда поток уже кончился, то есть удачное зачисление человек прочитал бы не раньше, чем связь оборвётся. Исход разговора известен ровно в этой точке, им и отвечаем (решение ведущего: слова исходов берутся у зачисления, второго словаря нет).
+    told.tell(&out);
     match out {
         Err(e) => {
             control.end(None).await;
@@ -1481,7 +1557,7 @@ fn card_names(kit: &Kit) -> HashMap<CardId, String> {
 /// себе, принимающий — о той стороне): два места со своими словами об одном
 /// праве однажды разойдутся, и человек прочтёт в двух строках журнала разное
 /// об одном и том же.
-fn access_word(write: bool) -> &'static str {
+pub(crate) fn access_word(write: bool) -> &'static str {
     if write {
         "разрешено читать и записывать"
     } else {

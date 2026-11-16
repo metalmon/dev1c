@@ -196,7 +196,7 @@ impl Book {
     /// карточка С ДВУМЯ живыми кодами — законное состояние хранилища (так
     /// проверяется, что `spend` гасит ровно один), и запрещать его в самом
     /// нижнем слое незачем. Выдаёт код человеку только окно, и оно зовёт
-    /// `reissue` всегда (`gui::panel::issue_code`).
+    /// `reissue` всегда (`codes::issue`).
     pub fn reissue(&mut self, card: &CardId, ticket: &crate::ticket::Ticket) -> Result<(), String> {
         self.write_ticket(card, ticket, true)
     }

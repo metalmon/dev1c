@@ -2950,12 +2950,12 @@ fn allowing_drops_the_code_it_spent() {
     let mut ui = Ui::for_test();
     let card = a_request().card().clone();
     let ticket = crate::ticket::Ticket::issue(a_request().peer, None, Vec::new()).unwrap();
-    ui.codes.push((card.clone(), ticket));
+    ui.codes.lock().push((card.clone(), ticket));
     let (tx, _rx) = tokio::sync::oneshot::channel();
     ui.waiting.push(crate::gui::Pending::new(a_request(), tx));
 
     answer_request(&mut ui, &card, "Ромашка", a_request().peer, Decision::Allow);
-    assert!(ui.codes.is_empty(), "погашенный зачислением код в карточке не остаётся");
+    assert!(ui.codes.lock().is_empty(), "погашенный зачислением код в карточке не остаётся");
 }
 
 /// Находка 3 задачи 2 плана починки по двум ревью: гасит код РАЗРЕШЕНИЕ,
@@ -2973,7 +2973,7 @@ fn an_allowance_that_never_arrived_keeps_the_code_it_did_not_spend() {
     let mut ui = Ui::for_test();
     let card = a_request().card().clone();
     let ticket = crate::ticket::Ticket::issue(a_request().peer, None, Vec::new()).unwrap();
-    ui.codes.push((card.clone(), ticket));
+    ui.codes.lock().push((card.clone(), ticket));
     // Разговор кончился: отвечать некуда — ровно то, о чём окно и говорит
     // словами «там уже не ждут ответа».
     ui.waiting.push(gone_pending(a_request()));
@@ -2981,7 +2981,7 @@ fn an_allowance_that_never_arrived_keeps_the_code_it_did_not_spend() {
     answer_request(&mut ui, &card, "Ромашка", a_request().peer, Decision::Allow);
 
     assert!(ui.log.last().unwrap().line.text.contains("не удалось"), "фикстура: ответ и правда не доехал — {:?}", ui.log.last());
-    assert_eq!(ui.codes.len(), 1, "никто не гасил этот код — он обязан остаться у человека на руках");
+    assert_eq!(ui.codes.lock().len(), 1, "никто не гасил этот код — он обязан остаться у человека на руках");
 }
 
 /// Minor ревью задач 6 и 7: при пустом имени базы карточка называлась дважды

@@ -2106,8 +2106,13 @@ fn card_name(ui: &Ui, key: &crate::cfg::CardId) -> String {
 /// который из концов случился, здесь нечем: второй счётчик рядом с чужим сроком разошёлся бы с ним на первой же правке (тот же довод, что
 /// у `Pending::reachable`). Поэтому говорится ровно то, что известно наверняка — ответа слишком долго не было, — и говорится, что делать.
 pub fn prune_enrollment(ui: &mut Ui, now: SystemTime) {
-    let dead: Vec<String> = ui.codes.iter().filter(|(_, t)| !t.alive(now)).map(|(card, _)| card_name(ui, card)).collect();
-    ui.codes.retain(|(_, t)| t.alive(now));
+    let dead: Vec<crate::cfg::CardId> = {
+        let mut held = ui.codes.lock();
+        let dead = held.iter().filter(|(_, t)| !t.alive(now)).map(|(card, _)| card.clone()).collect();
+        held.retain(|(_, t)| t.alive(now));
+        dead
+    };
+    let dead: Vec<String> = dead.iter().map(|card| card_name(ui, card)).collect();
     for card in dead {
         note_line(
             ui,
@@ -2271,7 +2276,7 @@ pub fn answer_request(ui: &mut Ui, card: &crate::cfg::CardId, name: &str, peer: 
             // вернёт никак — только «Выдать новый», то есть погасив тот,
             // который прямо сейчас годен.
             if sent {
-                ui.codes.retain(|(c, _)| c != card);
+                ui.codes.lock().retain(|(c, _)| c != card);
             }
         }
         Decision::Deny => {

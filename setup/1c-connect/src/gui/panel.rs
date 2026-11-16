@@ -496,7 +496,7 @@ pub fn enroll_facts(ui: &Ui, name: &str) -> link::Enroll {
     link::Enroll {
         waiting: ui.waiting.iter().any(|p| p.request.card() == &key && p.reachable()),
         declined: ui.declined.iter().any(|d| d == &key),
-        code_issued: ui.codes.iter().any(|(card, t)| card == &key && t.alive(now)),
+        code_issued: ui.codes.issued(&key, now),
         enrolled: ui.book.as_ref().map_or(0, |b| b.of(&key).len()),
         flow: ui.flows.iter().find(|(card, _)| card == &key).map(|(_, f)| *f),
     }
@@ -515,15 +515,12 @@ fn key_of(ui: &Ui, name: &str) -> Option<crate::cfg::CardId> {
     ui.cfg.by_name(name).map(|c| c.id())
 }
 
-/// Код карточки, пока он ЖИВ, — строкой для показа и для буфера обмена.
-/// `None` — кода нет вовсе либо он кончился.
+/// Код карточки по тому имени, которым её называет ЭКРАН, — пока он жив. `None` — кода нет вовсе либо он кончился.
 ///
-/// Одна дорога к строке кода на весь продукт: карточка (`link_card`),
-/// «Скопировать» и сама выдача (`issue_code`, когда отдаёт уже выданный)
-/// спрашивают здесь, и ни одна из трёх не умеет показать мёртвый код.
+/// Перевод имени в ключ здесь и только здесь (`key_of`), а сам запас спрашивается в беке (`codes::Codes::live`, там довод про одну дорогу
+/// к строке кода).
 pub fn live_code(ui: &Ui, card: &str, now: SystemTime) -> Option<String> {
-    let key = key_of(ui, card)?;
-    ui.codes.iter().find(|(c, t)| c == &key && t.alive(now)).map(|(_, t)| t.to_code())
+    ui.codes.live(&key_of(ui, card)?, now)
 }
 
 /// Главная кнопка «Связи»: ровно один предмет (решение владельца 3.11) —
@@ -1209,38 +1206,10 @@ pub struct Accepting {
     pub parties: Vec<PartyRow>,
 }
 
-/// Карточка, в которой написано слово, которого программа не знает (`Connection::role()` отдаёт отказ: правка файла руками, опечатка).
-/// Выдавать ей код нельзя — неизвестно, что она вообще делает, — и молчать нельзя: в списке она стоит под подписью «Непонятно, как
-/// подключаются», и это единственное место, где можно сказать, чем это кончается и что нажать.
-pub const ROLE_UNKNOWN_NOTE: &str = "Непонятно, как это соединение подключается: в настройках у него стоит слово, которого программа не \
-                                     знает. Выберите здесь, подключаетесь вы сами или принимаете подключения.";
-
-/// Карточка входящих не ждёт вовсе: человек выбрал «Подключаюсь сам» или «Всё на одной машине». Код таким не выдают — в первом случае его
-/// дают на той стороне и вставляют здесь, во втором подключаться не к кому.
-pub const NOT_ACCEPTING_NOTE: &str =
-    "Кода у этого соединения не будет: оно не ждёт входящих подключений. Если подключаетесь вы — код выдают \
-                                      на том компьютере, куда вы идёте, и вставляется он здесь; если всё на одной машине — подключаться не \
-                                      к кому.";
-
-/// Почему у этой карточки не будет кода — ОДНИ слова на все места, что об этом говорят. `None` — код выдать можно.
-///
-/// **Чем куплено (Important повторного ревью всей ветки).** Слова эти произносят три места: кнопка подвала (`main_button`), блок кода в
-/// карточке (`accepting_block::code_note`) и отказ у самой выдачи (`issue_code`). Каждое разбирало случаи само, и разобрали они разное:
-/// подвал знал два случая, блок кода — один, а страж у выдачи — тоже один, и мимо него проходили карточка с нераспознанной ролью и
-/// локальная. Докстрока `issue_code` при этом обещала «отказ у единственной двери». Теперь дверь и правда одна, и случаев у неё ровно
-/// столько, сколько их бывает.
-///
-/// Порядок разбора — от того, что человек выбрал сам, к тому, что он выбрал неизвестным словом: не ждёт входящих (его выбор, и слова ведут
-/// к обоим настоящим выходам), ждёт, но база не здесь (поправить «Где база» или взять код там, где база), роль не разобрана вовсе.
-pub fn no_code_note(c: &Connection) -> Option<&'static str> {
-    if link::waits_for_incoming(c) {
-        return None;
-    }
-    // Роль разобралась — значит это «Подключаюсь сам» либо «Всё на одной
-    // машине»: человек так выбрал, и говорить ему надо про выбор, а не про
-    // непонятное слово.
-    Some(if c.role().is_ok() { NOT_ACCEPTING_NOTE } else { ROLE_UNKNOWN_NOTE })
-}
+/// Слова о том, почему у карточки не будет кода, и сам разбор случаев переехали в бек задачей 6 (`codes`): отказ стоит у единственной
+/// двери к выдаче, а дверей к ней теперь две — окно и набранный `1c-connect code`. Здесь они остаются под прежними именами, потому что
+/// произносят их поверхности окна (кнопка подвала, блок кода в карточке).
+pub use crate::codes::{no_code_note, NOT_ACCEPTING_NOTE, ROLE_UNKNOWN_NOTE};
 
 /// Книга допуска не прочиталась — и так и говорится. Нуля на экране здесь быть не может: «Вы ещё никому не разрешили подключаться» в этом
 /// случае значило бы «никого не зачислили» там, где просто не прочитался файл (Important повторного ревью всей ветки; та же беда, которую
@@ -1730,110 +1699,18 @@ fn request_to_answer(ui: &Ui, card: &str) -> Option<crate::enroll::Request> {
     ui.waiting.iter().find(|p| p.request.card() == &key && p.reachable()).map(|p| p.request.clone())
 }
 
-/// Выдать код подключения карточке и запомнить его на этот запуск.
+/// Выдать код подключения карточке — тем же местом, каким его выдаёт набранный `1c-connect code` (`codes::issue`, там всё решение и все
+/// доводы целиком). Окну остаётся своё: сказать оговорку строкой журнала.
 ///
-/// `fresh` — перевыпуск: прежняя строка этой карточки забывается и на экран
-/// идёт новая. Без него уже выданная строка отдаётся как есть — «Показать
-/// код» на то и «показать», что второй раз дёргать книгу ему незачем, а
-/// человеку, который держит код в переписке, важно увидеть ТОТ ЖЕ код, а не
-/// очередной.
-///
-/// **Новая строка всегда гасит прежние коды этой карточки**
-/// (`Book::reissue`, а не `issue` — MEDIUM 2 проверки безопасности). Человек,
-/// нажимая «Выдать новый код», думает ровно одно: старый больше не работает,
-/// — и нажимает он это чаще всего потому, что старый куда-то утёк. Код,
-/// оставшийся живым после такого нажатия, живёт ещё сутки
-/// (`ticket::LIFETIME`), и нажавший об этом не узнает.
-///
-/// То же правило и у ПЕРВОЙ выдачи, не только у перевыпуска, и это не лишку:
-/// до неё карточка могла нести живой код из прошлого запуска, строки которого
-/// нет нигде (см. `Ui::codes`) — показать его человеку мы уже не можем, а
-/// впустить по нему кого-то книга ещё может. Одно правило вместо двух: код у
-/// карточки один, и он тот, что человек видит сейчас.
-///
-/// Чистого решения здесь нет и быть не может — это запись: `Ticket::issue`
-/// берёт случайный секрет, `Book::reissue` пишет файл. Проверяется оно не
-/// словами, а последствием: после вызова `ui.codes` несёт строку, которую
-/// `Book::verdict` опознаёт карточкой, а прежнюю — уже нет.
-///
-/// Ошибка идёт словами в журнал и не трогает `ui.codes`: человек не получит
-/// на руки строку, которой в книге нет (та же беда, от которой отказывается
-/// `Book::reissue` на просроченном тикете — и прежние коды такой отказ не
-/// гасит, карточка не остаётся без кода из-за негодного нового).
+/// Оговорка приезжает ЗНАЧЕНИЕМ (`Issued::note`), а не пишется выдачей: бек не знает типа `Line` (закон 8 спеки), и обе дороги к выдаче
+/// говорят её каждая своим голосом — окно строкой в журнал, командная строка печатью. Ложится она ПЕРЕД обычным «код — в карточке» от
+/// `run_link_act`, и порядок в журнале выходит такой: сперва оговорка, потом итог.
 fn issue_code(ui: &mut Ui, card: &str, fresh: bool) -> Result<String, String> {
-    // Отказ стоит ЗДЕСЬ, у единственной двери к выдаче, а не у каждого, кто
-    // в неё стучит: окно такой карточке кода уже не предлагает (ни кнопкой,
-    // ни пунктом меню), и останься решение только там — следующий вызов
-    // откуда-нибудь ещё вернул бы беду целиком. Слова те же, что читает
-    // человек в самой карточке, и берутся они оттуда же (`no_code_note`).
-    //
-    // Закрыта она на ВСЕ случаи, а не на один (Important повторного ревью всей
-    // ветки): прежде страж ловил только «база на той стороне», и мимо него
-    // проходили карточка с нераспознанной ролью и локальная — то есть
-    // обещание «отказ у единственной двери» эта же строка и не исполняла.
-    if let Some(why) = ui.cfg.by_name(card).and_then(no_code_note) {
-        return Err(why.to_string());
-    }
-    // Уже выданный отдаётся только ЖИВЫМ (`live_code`): «Показать код» на
-    // мёртвый код не показывает — он выдаёт новый, как если бы кода и не
-    // было, потому что для человека это одно и то же (Important 1 ревью).
-    if !fresh {
-        if let Some(code) = live_code(ui, card, SystemTime::now()) {
-            return Ok(code);
-        }
-    }
-    let id = crate::node::id_from_state(ui.kit.state())?;
-    // Адреса берутся у ЖИВОГО узла (`peer::Reach`) — релей и прямые, среди
-    // прямых и своя петля (`ticket::direct_with_loopback`, там и довод,
-    // почему петля обязательна). Без них дозвон шёл бы только поиском по
-    // ключу через серверы n0, то есть требовал бы настоящего интернета, а две
-    // копии на одной машине не нашли бы друг друга вовсе.
-    //
-    // Узел ещё не поднялся или не вышел в сеть — код выдаётся без адресов:
-    // это хуже (нужен интернет у обеих сторон), но не отказ. Молча так больше
-    // не бывает — оговорку говорит `blind_code_note` ниже.
-    let reach = ui.peer.as_ref().and_then(crate::peer::Peer::reach).unwrap_or_default();
-    let reach_empty = reach.relay.is_none() && reach.direct.is_empty();
-    let ticket = crate::ticket::Ticket::issue(id, reach.relay, reach.direct)?;
-    let code = ticket.to_code();
-    let silent = blind_code_note(reach_empty, card);
-    // Ключ берётся ДО книги: код выдаётся карточке, а не имени, и карточки, которой в настройках уже нет, выдавать его некуда.
-    let key = key_of(ui, card).ok_or_else(|| format!("Карточки «{card}» в настройках больше нет — код выдавать некому."))?;
-    let book = ui.book.as_mut().ok_or("Список разрешений не открылся — код выдать некуда.")?;
-    book.reissue(&key, &ticket)?;
-    ui.codes.retain(|(c, _)| c != &key);
-    ui.codes.push((key, ticket));
-    // Слово — ПОСЛЕ записи: кода, который не записался, и предупреждать не о
-    // чем. Ниже строкой ляжет обычное «код — в карточке» от `run_link_act`,
-    // и порядок в журнале выйдет такой: сперва оговорка, потом итог.
-    if let Some(text) = silent {
+    let issued = crate::codes::issue(&ui.kit, &ui.cfg, ui.peer.as_ref(), &ui.codes, card, fresh)?;
+    if let Some(text) = issued.note {
         gui::note_line(ui, Line { kind: Kind::Warn, text });
     }
-    Ok(code)
-}
-
-/// Оговорка к коду, выданному БЕЗ релея и без прямых адресов. `None` — в код
-/// попало хоть что-то, по чему дозваниваются.
-///
-/// Зачем она. `Peer::reach` отдаёт пусто в двух живых случаях: в первые
-/// секунды после запуска (узел ещё не поздоровался с релеем) и без интернета
-/// вовсе. Код при этом выдаётся — и это правильно, отказывать не за что, — но
-/// несёт он один ключ узла. Дозвониться по такому коду можно только поиском
-/// через серверы n0, то есть лишь при настоящем интернете у ОБЕИХ сторон, а
-/// человек видит обычную строку и передаёт её как обычную. Молчать тут значит
-/// отдать ему заведомо худший код и не сказать об этом ни слова; цена молчания
-/// — звонок «я вставил код, ничего не происходит», на который отвечать нечем.
-///
-/// Говорится это и на «Показать код», и на «Выдать новый»: оговорка про ту
-/// строку, которую человек сейчас держит в руках, а не про действие.
-fn blind_code_note(reach_empty: bool, card: &str) -> Option<String> {
-    reach_empty.then(|| {
-        format!(
-            "Код для «{card}» выдан, но программа ещё не вышла в сеть. \
-             Подключиться по нему получится только при интернете на обоих компьютерах. \
-             Если там не получится — выдайте новый код через минуту."
-        )
-    })
+    Ok(issued.code)
 }
 
 /// Позвонить зовущей карточкой: код — в поток узла, слово — человеку.
@@ -4810,13 +4687,13 @@ mod tests {
         }
     }
     use super::{
-        accepting_block, adopt_needed, adopt_topology, axis_of, axis_plan, base_here_answers, blind_code_note, can_save, card,
-        delete_on_confirm, delete_question_text, dialling_block, enroll_facts, fact_rows, fields_differ, folder_label, found_text,
-        issue_code, leave_question, link_menu, live_code, main_button, nothing_to_show, op_question, pick_face, profile_label,
-        project_facts, project_menu, project_rows, publication_switch_label, reason, request_to_answer, resolve_selected, row_marks,
-        save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts, tools_actions, tools_subject,
-        undecryptable_line, window_radius, Body, DeleteOnConfirm, Dirty, LinkAct, ProjectMenu, BOOK_UNREAD_NOTE, DELETE_CONFIRM_YES,
-        GATE_WORD, NOT_ACCEPTING_NOTE, OFF_WORD, ONBOARDING_ASK, ROLE_UNKNOWN_NOTE,
+        accepting_block, adopt_needed, adopt_topology, axis_of, axis_plan, base_here_answers, can_save, card, delete_on_confirm,
+        delete_question_text, dialling_block, enroll_facts, fact_rows, fields_differ, folder_label, found_text, issue_code, leave_question,
+        link_menu, live_code, main_button, nothing_to_show, op_question, pick_face, profile_label, project_facts, project_menu,
+        project_rows, publication_switch_label, reason, request_to_answer, resolve_selected, row_marks, save_hint, shown_base_url,
+        shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts, tools_actions, tools_subject, undecryptable_line,
+        window_radius, Body, DeleteOnConfirm, Dirty, LinkAct, ProjectMenu, BOOK_UNREAD_NOTE, DELETE_CONFIRM_YES, GATE_WORD,
+        NOT_ACCEPTING_NOTE, OFF_WORD, ONBOARDING_ASK, ROLE_UNKNOWN_NOTE,
     };
     use crate::cfg::{cfg_with, Connection};
     use crate::editors;
@@ -7138,23 +7015,6 @@ mod tests {
         assert!(ui.log.last().unwrap().line.text.contains("отменилась"), "{:?}", ui.log.last());
     }
 
-    /// Задача 3 плана «Починка ветки `channel`», пункт 4: код, выданный без
-    /// релея и без прямых адресов, уходил человеку молча. Случай живой —
-    /// первые секунды после запуска и работа без интернета, — а строка на вид
-    /// обычная: передают её как обычную, и дозвон идёт только поиском через
-    /// серверы n0.
-    ///
-    /// Падал так: `issue_code` брала `Peer::reach` и не смотрела в неё вовсе.
-    #[test]
-    fn a_code_without_relay_and_addresses_says_so() {
-        let note = blind_code_note(true, "Соединение 1").expect("пустой reach обязан сказать о себе");
-        assert!(note.contains("Соединение 1"), "оговорка называет карточку: их в списке несколько — {note}");
-        assert!(note.contains("не вышла в сеть") && note.contains("на обоих компьютерах"), "{note}");
-        // Хоть что-то в коде есть — оговорки нет: лишнее предупреждение на
-        // обычной выдаче научило бы пропускать её и в настоящем случае.
-        assert_eq!(blind_code_note(false, "Соединение 1"), None);
-    }
-
     /// Задача 3 плана «Починка ветки `channel`», пункт 5: «Разрешить» брало
     /// ПЕРВУЮ заявку карточки, не спросив, жив ли ещё её разговор. У карточки
     /// заявок бывает несколько (`save::take_request` ставит разные стороны в
@@ -7201,7 +7061,7 @@ mod tests {
         let card = ui.cfg.current().name.clone();
         let ticket = crate::ticket::Ticket::issue(a_key(5), None, Vec::new()).unwrap();
         let until = ticket.until;
-        ui.codes.push((ui.cfg.current().id(), ticket));
+        ui.codes.lock().push((ui.cfg.current().id(), ticket));
         let fresh = until - std::time::Duration::from_secs(60);
         assert!(enroll_facts(&ui, &card).code_issued, "живой код — ожидание настоящее");
         assert!(live_code(&ui, &card, fresh).is_some());
@@ -7210,7 +7070,7 @@ mod tests {
         let late = until + std::time::Duration::from_secs(1);
         assert!(live_code(&ui, &card, late).is_none(), "мёртвую строку ни показать, ни скопировать");
         crate::gui::prune_enrollment(&mut ui, late);
-        assert!(ui.codes.is_empty());
+        assert!(ui.codes.lock().is_empty());
         assert!(!enroll_facts(&ui, &card).code_issued, "«ждёт разрешения» за истёкший код — та же беда прошлой ветки");
         assert!(ui.log.last().unwrap().line.text.contains("истёк"), "{:?}", ui.log.last());
 

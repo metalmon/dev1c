@@ -3101,3 +3101,43 @@ fn fields_of_a_card_that_is_not_the_current_one_reach_its_own_block() {
     assert_eq!(ui.cfg.by_name("Ромашка").unwrap().db_user, "Кассир", "в памяти окна — то же, что на диске");
     assert_eq!(ui.cfg.current().name, "Buh", "правка полей текущее соединение не переключает");
 }
+
+/// **Отзыв, сделанный ЧУЖИМ процессом, пропадает из окна за один такт — и не позже** (круг правок 2 задачи 9).
+///
+/// Беда, которую мера держит: `Book` окна — снимок с момента своего последнего чтения, а набранный `1c-connect revoke` пишет свою
+/// `Book` на тот же файл. Перечитывала книгу только `reread_book`, и только по событиям; не случись на машине ничего, окно
+/// показывало бы снятую сторону БЕЗ СРОКА. Человек, видящий её в списке, считает её зачисленной и отзыв не повторит.
+///
+/// Половины две, и обе нужны. Первая — что такт правда забирает чужую правку (до него снимок нарочно проверяется устаревшим: не
+/// будь он устаревшим, мера сторожила бы пустое место). Вторая — что такт эту строку ЗОВЁТ: убери её из `tick`, и первая половина
+/// осталась бы зелёной, сторожа функцию, которую никто не вызывает. Сторож текстовый по той же причине, что у
+/// `main::tests::the_window_branch_hands_the_whole_start_to_one_path`: `tick` принимает живой `App` GPUI, которого в прогоне нет.
+#[test]
+fn a_revoke_by_another_process_leaves_the_window_within_one_tick() {
+    let mut ui = Ui::for_test();
+    ui.cfg = cfg::cfg_with(&["Ромашка"]);
+    let card = ui.cfg.current().id();
+    let key = iroh::SecretKey::from_bytes(&[11u8; 32]).public();
+    let mut book = crate::enrolled::Book::open(ui.kit.state()).expect("книга допуска завелась");
+    book.enroll(&card, key, "Заказчик", true, crate::wire::Side::WithAgents).expect("зачисление записалось");
+    ui.book = Some(book);
+
+    // Чужой процесс — своя `Book` на тот же файл, ровно как набранный `1c-connect revoke`.
+    crate::enrolled::Book::open(ui.kit.state()).expect("книга допуска").revoke(&card, key).expect("отзыв записался");
+    assert_eq!(ui.book.as_ref().expect("книга у окна").of(&card).len(), 1, "снимок окна устарел — иначе мере нечего ловить");
+
+    super::refresh_book_on_tick(&mut ui);
+    assert!(ui.book.as_ref().expect("книга у окна").of(&card).is_empty(), "за один такт окно обязано узнать об отзыве");
+    assert!(ui.log.is_empty(), "удавшийся такт молчит: журнал носит строки человеку, а не отчёт о своём здоровье");
+
+    const SRC: &str = include_str!("../mod.rs");
+    let from = SRC.find("fn tick(cx: &mut App)").expect("тик на месте");
+    let rest = &SRC[from..];
+    // Ровно тело тика, а не «сколько-то знаков от его начала»: отмеренный кусок однажды перестал бы доставать до нужной строки от
+    // одной дописанной сверху, и сторож позеленел бы молча. Конец тела — начало следующей функции в файле.
+    let body = &rest[..rest.find("\nfn ").unwrap_or(rest.len())];
+    // Строки комментариев выброшены, и это не придирка: закомментированный вызов сторож прошёл бы, а имя функции стоит ещё и в
+    // прозе над ним (проба краснотой: закомментируй вызов — без этой чистки тест остаётся зелёным).
+    let code: String = body.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+    assert!(code.contains("refresh_book_on_tick(ui)"), "тик обязан звать перечитывание: без этого устарелость снова без срока");
+}

@@ -279,7 +279,7 @@ fn run() -> Result<()> {
             }
             println!();
             // Дверь — последней строкой и первым клиентом: всё выше прочитано с диска и печатается всегда, а здесь впервые говорит ЖИВОЙ экземпляр. Разница названа словами нарочно: иначе человек не поймёт, свежее он видит или лежалое — а `status` он набирает ровно за этим.
-            match door::ask(&ctx.kit, door::Ask::Status) {
+            match door::ask(door::Ask::Status) {
                 // Слова — в `door::status_lines` и только там: там же их проверяет тест, который держит разницу «о связи пока не сообщает» и «связей нет». Карточка без состояния контракта своей строки не получает вовсе — так же, как в списке окна (`contract::contract_word` отдаёт `None`), и слова за неё дверь не выдумывает.
                 Ok(door::Answer::Status(v)) => {
                     for line in door::status_lines(&v) {
@@ -364,7 +364,7 @@ fn run() -> Result<()> {
             println!("Записано {n} сумм в checksums.txt");
         }
         Cmd::Use { name } => use_connection(&ctx, name.as_deref())?,
-        Cmd::Code { card } => issue_code(&ctx, card)?,
+        Cmd::Code { card } => issue_code(card)?,
         Cmd::Dial { code, card } => dial(&ctx, code, card)?,
     }
     Ok(())
@@ -376,8 +376,8 @@ fn run() -> Result<()> {
 /// Выдаёт ВСЕГДА новый и гасит прежний — то же, что кнопка «Выдать новый код»: строки уже выданного кода нет нигде, кроме памяти живого,
 /// и показать её набранная команда не может (см. `door::Ask::Code`). Оговорка к «слепому» коду печатается ПЕРЕД самим кодом, видом
 /// находки (`[ !! ]`), как её печатают остальные подкоманды.
-fn issue_code(ctx: &Ctx, card: Option<String>) -> Result<()> {
-    let answer = door::ask(&ctx.kit, door::Ask::Code { card }).map_err(|e| anyhow::anyhow!("{e}"))?;
+fn issue_code(card: Option<String>) -> Result<()> {
+    let answer = door::ask(door::Ask::Code { card }).map_err(|e| anyhow::anyhow!("{e}"))?;
     let door::Answer::Code(issued) = answer else { anyhow::bail!("{}", door::WRONG_ANSWER) };
     let issued = issued.map_err(|e| anyhow::anyhow!("{e}"))?;
     if let Some(note) = issued.note {
@@ -396,7 +396,7 @@ fn issue_code(ctx: &Ctx, card: Option<String>) -> Result<()> {
 fn dial(ctx: &Ctx, code: String, card: Option<String>) -> Result<()> {
     let name = card.clone().unwrap_or_else(|| ctx.cfg.current().name.clone());
     println!("Подключаюсь по «{name}»; ответа ждём до {} минут — на той стороне вопрос задают человеку.", DIAL_MINUTES);
-    let answer = door::ask(&ctx.kit, door::Ask::Dial { code, card }).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let answer = door::ask(door::Ask::Dial { code, card }).map_err(|e| anyhow::anyhow!("{e}"))?;
     let door::Answer::Dialled(out) = answer else { anyhow::bail!("{}", door::WRONG_ANSWER) };
     let text = door::dialled_words(&name, &out.map_err(|e| anyhow::anyhow!("{e}"))?).map_err(|e| anyhow::anyhow!("{e}"))?;
     println!("{text}");
@@ -511,12 +511,19 @@ fn peer_wiring(ctx: &Ctx) -> (peer::Peer, session::Wiring) {
 /// Туннель плюс мост, пока не нажмут Ctrl+C или сеанс не упадёт сам.
 fn connect(ctx: &Ctx) -> Result<()> {
     cfg::require_file(&ctx.kit)?;
-    // Один коннектор на СЕАНС пользователя (задача 6: было — на рабочее
-    // место): вторая копия не борется за порты и мьютекс проекта с этой —
+    // Один коннектор на УЧЁТНУЮ ЗАПИСЬ в пределах машины (задача 14: было —
+    // на сеанс): вторая копия не борется за порты и замок проекта с этой —
     // см. `single_instance`. Просить первую копию показать окно НЕ просим:
     // человек запросил обслуживание в терминале, и чужое всплывшее окно с
     // нулевым кодом было бы ответом не на его вопрос (`acquire`).
-    let _guard = single_instance::acquire(&ctx.kit, false)?;
+    //
+    // Замок — это открытая управляющая дверь, и держится он до конца
+    // функции. Первый снимок кладём сразу: `connect` ОБСЛУЖИВАЕТ, и
+    // умолчание двери («выключен») было бы о нём неправдой. Про связь он
+    // этой дверью пока не рассказывает — `cards: None` и есть «о связи не
+    // сообщаю», и `status` говорит это человеку словами.
+    let door = single_instance::acquire(&ctx.kit, false)?;
+    door.show(door::StatusView { serving: true, cards: None });
     // Признак «обслуживает этот комплект» — рядом, своим смыслом (не
     // взаимозаменяем с замком сеанса выше): его слушает сторож моста по
     // коннектору (`orphan::guard_owner`), и ключ у него не плывёт при
@@ -604,11 +611,17 @@ fn publication_failure_text(result: &Result<()>) -> Option<String> {
 #[cfg(not(feature = "gui"))]
 fn serve(ctx: &Ctx) -> Result<()> {
     cfg::require_file(&ctx.kit)?;
-    // Тот же единственный владелец сеанса, что у `connect` — см.
+    // Тот же единственный владелец на учётную запись, что у `connect` — см.
     // `single_instance`; и так же не просим первую копию показать окно:
     // `serve` поднимают планировщик и служба, которым нулевой код значил бы
     // «обслуживание идёт», а оно шло бы не здесь.
-    let _guard = single_instance::acquire(&ctx.kit, false)?;
+    //
+    // Замок — это и есть управляющая дверь (задача 14), и берётся она здесь,
+    // раньше всего прочего: набранная команда обязана застать её открытой с
+    // первого мига, а не с того, как поднялось обслуживание (публикация одна
+    // умеет ждать порт секундами). Отдельного `open` ниже больше нет —
+    // второй подъём двери не дался бы и самому себе.
+    let door = single_instance::acquire(&ctx.kit, false)?;
     // Тот же признак обслуживания, что у `connect` — см. комментарий там.
     let _serving = single_instance::hold_serving(&ctx.kit);
     // Та же проводка замка проекта, что у `connect` — см. комментарий там.
@@ -629,13 +642,9 @@ fn serve(ctx: &Ctx) -> Result<()> {
     // комментарий там.
     let _ = allow::write(&ctx.kit, true);
     let _off = OffOnExit(&ctx.kit);
-    // Управляющая дверь — раньше публикации и сеанса: набранная команда обязана застать её открытой с первого мига, а не с того, как поднялось обслуживание (публикация одна умеет ждать порт секундами). Отказ двери переживаем словами (`open_or_say`, журнал и экран): обслуживание вызовов от неё не зависит, а молчать о ней нельзя — `status` сказал бы «бек не запущен» при живом беке.
-    let door = door::open_or_say(&ctx.kit);
     // Первый снимок — сразу, не дожидаясь первой же перемены в сеансе: до неё дверь отвечала бы умолчанием, то есть «не обслуживает» при поднятом обслуживании.
     let card = ctx.cfg.current().name.clone();
-    if let Some(d) = &door {
-        d.show(status_view(&card, &session::State::Off));
-    }
+    door.show(status_view(&card, &session::State::Off));
     // Без сеанса на стенде никто больше базу не публикует (см. спеку
     // «HTTP-сервис базы ведёт коннектор») — поднимаем её перед тем, как
     // начать слушать, тем же сервисом, что умрёт вместе с этим процессом
@@ -657,17 +666,11 @@ fn serve(ctx: &Ctx) -> Result<()> {
     let (_node, wiring) = peer_wiring(ctx);
     // Дверь учится ДЕЛАТЬ, а не только рассказывать: `code` и `dial` с этой машины идут к ЭТОМУ узлу (задача 6 плана). Решает за неё
     // бек целиком (`door::serves`) — тот же самый, что ставит себе окно, потому что клиенты у двери одни.
-    if let Some(d) = &door {
-        d.answers(door::serves(ctx.kit.clone(), _node.clone(), one_c_connect::codes::Codes::default()));
-    }
+    door.answers(door::serves(ctx.kit.clone(), _node.clone(), one_c_connect::codes::Codes::default()));
     // Состояние сеанса здесь прежде никому не отдавали (`|_| {}`), и отдавать было некому: экрана у этой сборки нет. Теперь его спрашивают дверью, и снимок обновляется на каждую перемену — так `status` с другой машины видит связь, а не последнее, что успел напечатать терминал.
     let on_state = {
         let (door, card) = (door.clone(), card.clone());
-        move |st: session::State| {
-            if let Some(d) = &door {
-                d.show(status_view(&card, &st));
-            }
-        }
+        move |st: session::State| door.show(status_view(&card, &st))
     };
     let mut s =
         session::start_with_enabled(ctx.cfg.clone(), ctx.kit.clone(), ctx.sink.clone(), Arc::new(AtomicBool::new(true)), wiring, on_state);

@@ -1,14 +1,18 @@
 //! Управляющая дверь живого экземпляра: команда достукивается до того процесса, чей значок в трее, а не поднимает свой второй (закон 2 спеки `2026-11-15-pairing-belongs-to-the-back.md`, раздел 4).
 //!
-//! **Трудность, из которой дверь и выросла.** Узел, порты и книга принадлежат одному процессу на комплект (`single_instance`). Значит `1c-connect allow …` не может завести свой узел: ему нечем ни принять поток, ни дописать книгу, пока их держит живой. Дверь — тот способ достучаться; `status` её первый клиент, потому что он ничего не меняет.
+//! **Трудность, из которой дверь и выросла.** Узел, порты и книга принадлежат одному процессу на учётную запись (`single_instance`, задача 14). Значит `1c-connect allow …` не может завести свой узел: ему нечем ни принять поток, ни дописать книгу, пока их держит живой. Дверь — тот способ достучаться; `status` её первый клиент, потому что он ничего не меняет.
 //!
-//! **Почему именно именованный канал, а не то, что в программе уже есть.** Межпроцессная просьба показать окно (`single_instance::serve_show_requests`) сделана именованным СОБЫТИЕМ, и событие без атрибутов безопасности видно только внутри сеанса создателя. Для двери это не годится, и причина не вкусовая: отказ 15.11, сжёгший владельцу рабочий день, состоял ровно в том, что бек жил в одном сеансе (ssh), а человек приходил из другого. Дверь обязана работать между сеансами ОДНОЙ учётной записи, и именованный канал Windows сеансом не ограничен. На Linux — сокет в каталоге состояния (`Kit::state`), рядом с замком: порт на петле спека запрещает отдельным доводом (он открыт любому процессу машины, и продукт уже тратит силы, доказывая, кто его держит, — `holder::of_port`).
+//! **Почему именно именованный канал, а не то, что в программе уже есть.** Межпроцессная просьба показать окно (`single_instance::serve_show_requests`) сделана именованным СОБЫТИЕМ, и событие без атрибутов безопасности видно только внутри сеанса создателя. Для двери это не годится, и причина не вкусовая: отказ 15.11, сжёгший владельцу рабочий день, состоял ровно в том, что бек жил в одном сеансе (ssh), а человек приходил из другого. Дверь обязана работать между сеансами ОДНОЙ учётной записи, и именованный канал Windows сеансом не ограничен. На Linux — сокет в каталоге времени выполнения учётной записи (`runtime_dir`): порт на петле спека запрещает отдельным доводом (он открыт любому процессу машины, и продукт уже тратит силы, доказывая, кто его держит, — `holder::of_port`).
+//!
+//! **Дверь — она же замок рабочего места, и второго механизма в продукте нет** (задача 14). Единица — одна копия на УЧЁТНУЮ ЗАПИСЬ в пределах машины: ни комплект, ни сеанс в неё не входят. Отсюда вся арифметика замка: взять его — значит открыть эту дверь (`single_instance::acquire`), а спросить, жив ли держатель, — постучать в неё (`single_instance::is_held`). Прежний именованный мьютекс ушёл: он виден только в своём сеансе, то есть считал единицей «сеанс × учётка», и ровно поэтому вход по ssh при живом окне на рабочем столе 15.11 поднял вторую копию вместо того, чтобы получить отказ словами.
+//!
+//! **Разница осей живёт в ОДНОМ месте — в адресе двери** (`pipe_path` на Windows, `sock_path`/`runtime_dir` на Linux), и выше неё про платформу не знает никто. Общего примитива здесь нет и быть не может: именованные объекты ядра Windows по умолчанию живут в сеансе, а у файловой системы Linux сеансов нет вовсе. Всё остальное — поведение, и оно на осях одно.
 //!
 //! **Почему у двери явный дескриптор прав, а не умолчание.** Тем же абзацем спека отличает канал от порта на петле: «канал с правами учётной записи отвечает на вопрос „кто это“ средствами ОС, а не нашими догадками». Канал, созданный без дескриптора, этого не делает: умолчание пускает к нему больше, чем нас, и тогда дверь ничем не лучше порта — а по ней поедут разрешения человека (`allow`/`decline`, задача 7 плана), то есть чужое «разрешить» вместо хозяйского. Поэтому прав ровно двое: наша учётная запись (её SID) и SYSTEM, наследование запрещено (`D:P`). На Linux то же делают права на сам сокет (0600) и проверка `SO_PEERCRED`.
 //!
 //! **Охрана у двери двусторонняя, и это не перестраховка.** Дескриптор и `first_pipe_instance` защищают от того, кто придёт ПОСЛЕ нас; самозванец, успевший создать канал ПЕРВЫМ, нашему беку дверь открыть не даст (и тот скажет об этом словами — `NAME_TAKEN`), а вот клиента принял бы охотно. Поэтому и клиент спрашивает ОС, чей процесс держит сервер, и при расхождении отказывает словами (`STRANGER_DOOR`).
 //!
-//! **Имя двери считается тем же `single_instance::guard_key`, что и ключ замка.** У замка и двери один вопрос — «чья это копия», — и ответ обязан быть один: второе правило чистки имени разошлось бы с первым при следующей правке. Чужая учётная запись на той же машине стучится в ДРУГУЮ дверь и нашей не видит.
+//! **Имя двери считается тем же `single_instance::guard_key`, что и ключ замка.** У замка и двери один вопрос — «чья это копия», — и с задачи 14 это буквально один вопрос к одному объекту. Чужая учётная запись на той же машине стучится в ДРУГУЮ дверь и нашей не видит.
 //!
 //! **Кадр — тот же `wire::Frame`**, что возит сообщения по каналу между машинами: второго способа упаковки в продукте не заводим (решение ведущего). Поэтому `Frame` и стал общим по полезной нагрузке — им возятся и `wire::Msg`, и `Ask`/`Answer`.
 //!
@@ -30,7 +34,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 /// Слова отказа — дословно из спеки (раздел 4): «бек не запущен — поднимите `1c-connect serve` или откройте окно». Живут один раз и здесь: их говорит `ask` всякому клиенту, и их же печатает `status`, объясняя, почему показанное выше прочитано с диска.
 pub const NO_BACK_END: &str = "бек не запущен — поднимите 1c-connect serve или откройте окно";
 
-/// Имя двери занято — отказ беку при подъёме, и он не молчит. Живут один раз здесь: `open` кладёт их в саму ошибку, а `open_or_say` уносит ту же строку и в журнал, и на экран — тем же приёмом, что `gate::refuse_to_serve`.
+/// Имя двери занято — отказ беку при подъёме, и он не молчит. Живут один раз здесь: `open_at` кладёт их в саму ошибку, и по ней же `single_instance::acquire_at` узнаёт случай «имя занято» — вид ошибки (`AddrInUse`) одинаков на обеих осях, а человеку из него выходят слова второй копии (`single_instance::taken`).
 ///
 /// Случая два, и человеку оба названы: либо программа уже запущена (обычное), либо имя занял чужой процесс (тогда наш бек дверь не откроет вовсе — и это верный исход, самозванец не должен получить ни одной команды).
 pub const NAME_TAKEN: &str = "имя управляющей двери уже занято: его держит либо вторая копия программы, либо чужой процесс — закройте первую копию, а если её нет, сообщите нам: своих команд такой двери отдавать нельзя";
@@ -77,6 +81,11 @@ impl Ask {
             Ask::Status | Ask::Code { .. } => ASK_WAIT,
             Ask::Dial { .. } => DIAL_WAIT.saturating_add(ASK_WAIT),
         }
+    }
+
+    /// Сколько ждёт ответа КЛИЕНТ: срок самого дела у двери плюс обычный срок обмена. Одно выражение на `ask_at` и на тест, который сторожит порядок сроков: записанная дважды формула была бы второй мерой на тот же вопрос, и регрессию внешней ноги не поймал бы никто (находка ревью задачи 6).
+    fn client_wait(&self) -> Duration {
+        self.wait().saturating_add(ASK_WAIT)
     }
 }
 
@@ -216,37 +225,28 @@ pub fn dialled_words(card: &str, o: &crate::enroll::Outcome) -> Result<String, S
     }
 }
 
-/// Имя двери — единственное место, где оно строится (тот же довод, что у `single_instance::instance_mutex_name`: вторая формулировка смотрела бы не на тот объект). Ключ — `guard_key`, тот же, что у замка.
+/// Имя двери — единственное место, где оно строится (тот же довод, что у `single_instance::show_event_name`: вторая формулировка смотрела бы не на тот объект). Ключ — `guard_key`, тот же, что у замка.
 pub fn door_name(user: &str) -> String {
     format!("1c-connect-door-{}", guard_key(user))
 }
 
-/// Открыть дверь — сторона бека. Зовут оба варианта `Start` (`gui::launch`) и `fn serve` в сборке без окна: дверь есть у всякого живого экземпляра, потому что клиенты у всех одни.
+/// Открыть дверь — сторона бека, и она же взятие замка рабочего места. Зовут её не напрямую: подъём идёт через `single_instance::acquire`, который и отличает «имя занято второй копией» от прочих отказов. Отдельного замка больше нет — открыть эту дверь и значит быть единственной копией учётной записи на машине (задача 14).
 ///
 /// Держите возвращённую `Door` до конца процесса: уйдёт она со стека — ящик останется жив (его держит поток приёма), но рассказывать ему о новостях будет некому.
 pub fn open(kit: &Kit) -> io::Result<Door> {
     open_at(&door_name(&current_user()), kit)
 }
 
-/// Открыть дверь и пережить отказ: слова в журнал и на экран, `None` — двери нет. Отказ двери не смертелен ни для окна, ни для `serve` — обслуживание вызовов агента от неё не зависит, — но молчать о нём нельзя: человек, набравший `1c-connect status`, получил бы «бек не запущен» при живом беке и не узнал бы, почему.
-pub fn open_or_say(kit: &Kit) -> Option<Door> {
-    match open(kit) {
-        Ok(d) => Some(d),
-        Err(e) => {
-            let text = format!(
-                "управляющая дверь не открылась: {e}. Обслуживание и окно работают, но набранные команды до этого экземпляра не \
-                 достучатся — остановите его и запустите снова."
-            );
-            crate::journal::write(kit, crate::journal::Kind::Fail, &text);
-            eprintln!("{text}");
-            None
-        }
-    }
+/// Отвечает ли дверь с таким именем — то есть жив ли держатель замка. Стук, а не взгляд на объект: `single_instance::is_held` спрашивает им живость владельца и ничего при этом не занимает, так что два проверяющих не заверяют живость друг друга (находка ревью задачи 2, прежде стоявшая на `OpenMutexW`/`/proc/locks`).
+///
+/// Чужая дверь под нашим именем — это `false`: `ask_at` отказывает ей до первого слова (`STRANGER_DOOR`), и держателем она нам не владелец.
+pub(crate) fn answers(name: &str) -> bool {
+    matches!(ask_at(name, Ask::Status), Ok(Answer::Status(_)))
 }
 
 /// Спросить живого — сторона клиента. Своего бека не поднимает и ничем не владеет: нет живого — `NO_BACK_END` словами.
-pub fn ask(kit: &Kit, q: Ask) -> Result<Answer, String> {
-    ask_at(&door_name(&current_user()), kit, q)
+pub fn ask(q: Ask) -> Result<Answer, String> {
+    ask_at(&door_name(&current_user()), q)
 }
 
 /// Отдельный рантайм на каждую сторону двери: клиент — набранная команда, у которой своего рантайма нет вовсе, а бек открывает дверь до того, как поднимет сеанс (у окна рантайма на главном потоке не будет никогда — там GPUI).
@@ -319,17 +319,42 @@ fn pipe_path(name: &str) -> String {
     format!(r"\\.\pipe\{name}")
 }
 
-/// Путь сокета: имя двери файлом в каталоге состояния комплекта — «адрес двери в каталоге состояния, рядом с замком» (спека, раздел 4).
+/// Путь сокета: имя двери файлом в каталоге времени выполнения УЧЁТНОЙ ЗАПИСИ, а не комплекта (задача 14).
+///
+/// Прежде он лежал в `Kit::state`, то есть считал единицей комплект: два комплекта одной учётной записи получали по своей двери, по своему замку и по своей копии программы — а единица продукта одна, и это учётная запись на машине. Заодно это делает правдой довод, за который ревью задачи 5 поставило Critical: «сокет лежит в нашем каталоге» перестало быть выводом и стало замером — каталог заводим и проверяем мы сами (`runtime_dir`).
 #[cfg(not(windows))]
-fn sock_path(name: &str, kit: &Kit) -> std::path::PathBuf {
-    kit.state_path(&format!("{name}.sock"))
+fn sock_path(name: &str) -> io::Result<std::path::PathBuf> {
+    Ok(runtime_dir()?.join(format!("{name}.sock")))
+}
+
+/// Каталог времени выполнения учётной записи. `$XDG_RUNTIME_DIR` — его заводит на вход в систему сам systemd: свой на каждую учётную запись, права 0700, владелец — она же, и чистится при выходе. Нет его (служба, cron, контейнер без systemd) — заводим `/tmp/1c-connect-<uid>` сами и теми же правами.
+///
+/// **Права здесь не украшение, и чужой каталог — отказ, а не повод подправить.** По сокету в нём поедут разрешения человека (`allow`/`decline`), и каталог, открытый чужому на запись, дал бы ему подменить дверь, пока нашей ещё нет. Поэтому после `create_dir_all` права ставятся заново (чужому каталогу ядро этого не позволит — отказ), а владелец сверяется с нашим uid: совпал — каталог наш, не совпал — двери здесь не место.
+#[cfg(not(windows))]
+fn runtime_dir() -> io::Result<std::path::PathBuf> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    if let Some(d) = std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
+        return Ok(std::path::PathBuf::from(d));
+    }
+    // SAFETY: `getuid` ничего не принимает и не может отказать.
+    let uid = unsafe { libc::getuid() };
+    let dir = std::path::PathBuf::from(format!("/tmp/1c-connect-{uid}"));
+    std::fs::create_dir_all(&dir)?;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    if std::fs::metadata(&dir)?.uid() != uid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("каталог управляющей двери {} принадлежит не вам — дверь в нём открывать нельзя", dir.display()),
+        ));
+    }
+    Ok(dir)
 }
 
 /// Приём — своим потоком со своим рантаймом (тот же приём и та же причина, что у узла и сеанса, см. `peer.rs`): у окна главный поток занят GPUI, а у `serve` — ожиданием Ctrl+C, и ждать стука там нельзя ни тому, ни другому.
 ///
 /// Каждый стук — своей задачей, и потолок «очередь на время одного ответа» снят задачей 6 вместе с поводом так считать: ответом перестал быть один снимок из памяти. `dial` ждёт человека у чужого экрана до пяти с половиной минут (`Ask::wait`), и обслуживай дверь стуки по очереди — набранный рядом `status` всё это время читал бы «бек не запущен» при живом беке. Сроки на разговор остаются и теперь их двое — см. `answer`.
 #[cfg(windows)]
-fn open_at(name: &str, _kit: &Kit) -> io::Result<Door> {
+pub(crate) fn open_at(name: &str, _kit: &Kit) -> io::Result<Door> {
     let path = pipe_path(name);
     // Права назначаются ДО первого экземпляра канала и держатся всё время приёма: каждый следующий экземпляр создаётся с тем же дескриптором, иначе второй и дальнейшие достались бы умолчанию — то есть дверь была бы заперта только до первого стука.
     let rights = Rights::of_account(&my_sid()?)?;
@@ -426,12 +451,12 @@ fn pipe(path: &str, rights: &Rights, first: bool) -> io::Result<tokio::net::wind
     }
 }
 
-/// То же, что на Windows, но сокетом в каталоге состояния — см. докстроку выше и заголовок модуля.
+/// То же, что на Windows, но сокетом в каталоге времени выполнения учётной записи — см. докстроку выше и заголовок модуля.
 #[cfg(not(windows))]
-fn open_at(name: &str, kit: &Kit) -> io::Result<Door> {
+pub(crate) fn open_at(name: &str, kit: &Kit) -> io::Result<Door> {
     use std::os::unix::fs::PermissionsExt;
     use tokio::net::UnixListener;
-    let path = sock_path(name, kit);
+    let path = sock_path(name)?;
     if path.exists() {
         // Файл есть — два разных случая, и путать их нельзя. За ним ОТВЕЧАЮТ: имя занято (вторая копия либо самозванец), и снимать дверь нельзя — человеку слова (`NAME_TAKEN`), как и на Windows отказ `first_pipe_instance`. Проба — обычным блокирующим `connect`: рантайма для неё не нужно, и ждать она не умеет.
         if std::os::unix::net::UnixStream::connect(&path).is_ok() {
@@ -445,7 +470,7 @@ fn open_at(name: &str, kit: &Kit) -> io::Result<Door> {
         let _in_rt = rt.enter();
         UnixListener::bind(&path)?
     };
-    // Права на сам сокет, а не на каталог состояния: в каталоге живут параметры человека и журнал, и менять их режим ради двери значило бы править то, о чём не просили. 0600 — стучать вправе только наша учётная запись, и отвечает на это ядро, а не наши догадки (спека, раздел 4).
+    // Права на сам сокет, а не только на каталог вокруг него: каталог может быть чужим по происхождению (`$XDG_RUNTIME_DIR` заводит systemd), и полагаться на одни его права значило бы снова рассуждать там, где можно замерить. 0600 — стучать вправе только наша учётная запись, и отвечает на это ядро, а не наши догадки (спека, раздел 4).
     //
     // ponytail: между `bind` и этой строкой сокет недолго живёт с правами по умолчанию (umask), и в эту щель чужой успел бы соединиться. Закрыта она не здесь, а `peer_is_ours` на приёме: uid пришедшего сверяется с нашим на КАЖДЫЙ стук. Снимать щель заранее нечем — `umask` общий на процесс, и трогать его ради одного файла значило бы править чужие.
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
@@ -490,7 +515,7 @@ fn peer_is_ours(stream: &tokio::net::UnixStream) -> bool {
 const BUSY_PAUSE: Duration = Duration::from_millis(50);
 
 #[cfg(windows)]
-async fn knock(name: &str, _kit: &Kit) -> io::Result<Knock> {
+async fn knock(name: &str) -> io::Result<Knock> {
     use tokio::net::windows::named_pipe::ClientOptions;
     use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
     let path = pipe_path(name);
@@ -506,8 +531,8 @@ async fn knock(name: &str, _kit: &Kit) -> io::Result<Knock> {
 }
 
 #[cfg(not(windows))]
-async fn knock(name: &str, kit: &Kit) -> io::Result<Knock> {
-    tokio::net::UnixStream::connect(sock_path(name, kit)).await
+async fn knock(name: &str) -> io::Result<Knock> {
+    tokio::net::UnixStream::connect(sock_path(name)?).await
 }
 
 /// Чей процесс держит дверь, в которую мы только что постучали. Спрашивается у ОС: `GetNamedPipeServerProcessId` отдаёт процесс сервера, а владельца его токена называет `holder::owner_of_pid` — тот же способ, которым продукт уже отвечает на «чей это процесс» в двух других местах, и второго правила здесь не заводим.
@@ -543,10 +568,10 @@ fn server_is_ours(client: &Knock) -> Result<(), String> {
     }
 }
 
-fn ask_at(name: &str, kit: &Kit, q: Ask) -> Result<Answer, String> {
+fn ask_at(name: &str, q: Ask) -> Result<Answer, String> {
     let rt = runtime().map_err(|e| format!("живой экземпляр не спрошен: {e}"))?;
     rt.block_on(async {
-        let mut stream = knock(name, kit).await.map_err(|e| {
+        let mut stream = knock(name).await.map_err(|e| {
             if no_door(&e) {
                 NO_BACK_END.to_string()
             } else {
@@ -555,8 +580,8 @@ fn ask_at(name: &str, kit: &Kit, q: Ask) -> Result<Answer, String> {
         })?;
         // До первого же сказанного слова: вопрос чужому — это уже утечка (а с задачи 7 плана по этой двери поедет разрешение человека).
         server_is_ours(&stream)?;
-        // Ждём РОВНО столько, сколько живому отмерено на это дело, плюс обычный срок на сам обмен (`Ask::wait`): уйди клиент раньше, человек прочёл бы наше «молчит» вместо настоящей причины, которую живой как раз дописывает.
-        let waiting = q.wait() + ASK_WAIT;
+        // Ждём РОВНО столько, сколько живому отмерено на это дело, плюс обычный срок на сам обмен (`Ask::client_wait`): уйди клиент раньше, человек прочёл бы наше «молчит» вместо настоящей причины, которую живой как раз дописывает.
+        let waiting = q.client_wait();
         Frame::write(&mut stream, &q).await.map_err(|r| not_answered(&r))?;
         match tokio::time::timeout(waiting, Frame::read::<_, Answer>(&mut stream)).await {
             Ok(Ok(a)) => Ok(a),
@@ -588,10 +613,9 @@ mod tests {
     /// Второй вопрос в том же тесте и проверяет «ничего не поднимает»: подними первый вопрос бека сам — и второй получил бы ответ, а не тот же отказ.
     #[test]
     fn a_closed_door_is_refused_in_words_and_nothing_is_started() {
-        let (_dir, kit) = kit_for_test();
         let name = test_door("closed");
-        assert_eq!(ask_at(&name, &kit, Ask::Status).unwrap_err(), NO_BACK_END);
-        assert_eq!(ask_at(&name, &kit, Ask::Status).unwrap_err(), NO_BACK_END, "первый отказ не завёл бека тайком");
+        assert_eq!(ask_at(&name, Ask::Status).unwrap_err(), NO_BACK_END);
+        assert_eq!(ask_at(&name, Ask::Status).unwrap_err(), NO_BACK_END, "первый отказ не завёл бека тайком");
     }
 
     /// Имя двери принадлежит учётной записи: чужая на той же машине стучится в ДРУГУЮ дверь.
@@ -611,7 +635,7 @@ mod tests {
             serving: true, cards: Some(vec![CardState { name: "Ромашка".into(), word: "подключено".into() }])
         };
         door.show(shown.clone());
-        match ask_at(&name, &kit, Ask::Status) {
+        match ask_at(&name, Ask::Status) {
             Ok(Answer::Status(got)) => assert_eq!(got, shown, "ответ — тот снимок, что показал держатель"),
             other => panic!("живой обязан ответить: {other:?}"),
         }
@@ -625,9 +649,7 @@ mod tests {
         let door = open_at(&name, &kit).expect("дверь открылась");
         door.show(StatusView { serving: true, cards: Some(vec![]) });
         for n in 1..=3 {
-            let Ok(Answer::Status(got)) = ask_at(&name, &kit, Ask::Status) else {
-                panic!("стук {n} остался без ответа")
-            };
+            let Ok(Answer::Status(got)) = ask_at(&name, Ask::Status) else { panic!("стук {n} остался без ответа") };
             assert!(got.serving, "стук {n}");
         }
     }
@@ -652,7 +674,7 @@ mod tests {
         let (_dir, kit) = kit_for_test();
         let name = test_door("rights");
         let _door = open_at(&name, &kit).expect("дверь открылась");
-        let mode = std::fs::metadata(sock_path(&name, &kit)).expect("сокет на месте").permissions().mode();
+        let mode = std::fs::metadata(sock_path(&name).expect("каталог двери наш")).expect("сокет на месте").permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "ни группе, ни остальным — ничего: {mode:o}");
     }
 
@@ -679,7 +701,7 @@ mod tests {
     /// Что она ловит, чего не ловит круговой тест в одном процессе: ошибку в дескрипторе безопасности (чужому процессу той же учётной записи дверь обязана открыться, а не захлопнуться), настоящий `GetNamedPipeServerProcessId` на ЧУЖОМ процессе и сверку его SID, а на Linux — права сокета и `SO_PEERCRED` с обеих сторон. Проверить разные УЧЁТНЫЕ ЗАПИСИ так по-прежнему нельзя, и декораций для этого здесь нет.
     #[test]
     fn a_door_opened_by_another_process_answers_this_one() {
-        let (dir, kit) = kit_for_test();
+        let (dir, _kit) = kit_for_test();
         let name = test_door("cross");
         let mut helper = std::process::Command::new(std::env::current_exe().expect("путь к этому же тестовому бинарю"))
             .args(["--exact", "door::tests::the_helper_holds_a_door", "--ignored"])
@@ -692,7 +714,7 @@ mod tests {
         // Ждём, пока помощник успеет открыть дверь: сборки нет, но процесс всё же стартует не мгновенно. Опрос, а не сон на глазок, — иначе мера превратилась бы в ожидание самой себя.
         let mut got = None;
         for _ in 0..100 {
-            if let Ok(Answer::Status(v)) = ask_at(&name, &kit, Ask::Status) {
+            if let Ok(Answer::Status(v)) = ask_at(&name, Ask::Status) {
                 got = Some(v);
                 break;
             }
@@ -725,12 +747,12 @@ mod tests {
         let door = open_at(&name, &kit).expect("дверь открылась");
         let issued = crate::codes::Issued { code: "код".into(), note: Some("оговорка".into()) };
         door.answers(a_doer(Answer::Code(Ok(issued.clone())), Duration::ZERO));
-        match ask_at(&name, &kit, Ask::Code { card: Some("Ромашка".into()) }) {
+        match ask_at(&name, Ask::Code { card: Some("Ромашка".into()) }) {
             Ok(Answer::Code(Ok(got))) => assert_eq!(got, issued, "код и оговорка доехали целиком"),
             other => panic!("живой обязан ответить выдачей: {other:?}"),
         }
         door.answers(a_doer(Answer::Dialled(Ok(an_outcome())), Duration::ZERO));
-        match ask_at(&name, &kit, Ask::Dial { code: "код".into(), card: None }) {
+        match ask_at(&name, Ask::Dial { code: "код".into(), card: None }) {
             Ok(Answer::Dialled(Ok(got))) => assert_eq!(got, an_outcome(), "исход зачисления доехал тем же значением"),
             other => panic!("живой обязан ответить исходом: {other:?}"),
         }
@@ -744,12 +766,12 @@ mod tests {
         let door = open_at(&name, &kit).expect("дверь открылась");
         door.show(StatusView { serving: true, cards: Some(vec![]) });
         door.answers(a_doer(Answer::Dialled(Ok(an_outcome())), Duration::from_secs(2)));
-        let (slow_name, slow_kit) = (name.clone(), kit.clone());
-        let slow = std::thread::spawn(move || ask_at(&slow_name, &slow_kit, Ask::Dial { code: "код".into(), card: None }));
+        let slow_name = name.clone();
+        let slow = std::thread::spawn(move || ask_at(&slow_name, Ask::Dial { code: "код".into(), card: None }));
         // Не сон на глазок: ждём, пока медленный стук правда дойдёт до исполнителя, и только потом спрашиваем состояние.
         std::thread::sleep(Duration::from_millis(300));
         let quick = std::time::Instant::now();
-        let Ok(Answer::Status(v)) = ask_at(&name, &kit, Ask::Status) else {
+        let Ok(Answer::Status(v)) = ask_at(&name, Ask::Status) else {
             panic!("состояние обязано отвечать, пока идёт звонок")
         };
         assert!(v.serving, "ответил держатель, а не умолчание");
@@ -765,11 +787,11 @@ mod tests {
         let (_dir, kit) = kit_for_test();
         let name = test_door("notready");
         let _door = open_at(&name, &kit).expect("дверь открылась");
-        let Ok(Answer::Code(Err(why))) = ask_at(&name, &kit, Ask::Code { card: None }) else {
+        let Ok(Answer::Code(Err(why))) = ask_at(&name, Ask::Code { card: None }) else {
             panic!("отказ обязан приехать видом выдачи, а не чужим")
         };
         assert_eq!(why, crate::peer::NOT_READY);
-        let Ok(Answer::Dialled(Err(why))) = ask_at(&name, &kit, Ask::Dial { code: "к".into(), card: None }) else {
+        let Ok(Answer::Dialled(Err(why))) = ask_at(&name, Ask::Dial { code: "к".into(), card: None }) else {
             panic!("отказ обязан приехать видом звонка")
         };
         assert_eq!(why, crate::peer::NOT_READY);
@@ -783,9 +805,10 @@ mod tests {
         assert_eq!(Ask::Status.wait(), ASK_WAIT);
         assert_eq!(Ask::Code { card: None }.wait(), ASK_WAIT);
         assert_eq!(DIAL_WAIT, crate::enroll::DECISION + crate::enroll::PATIENCE, "мера дела — та же, что у самого разговора");
-        let at_the_door = Ask::Dial { code: String::new(), card: None }.wait();
-        // Клиент считает свой срок тем же выражением, что и `ask_at`, — порядок проверяется на том, что там и стоит.
-        let at_the_client = at_the_door + ASK_WAIT;
+        let call = Ask::Dial { code: String::new(), card: None };
+        let at_the_door = call.wait();
+        // Срок клиента берётся у того же имени, которое зовёт `ask_at`, а не вычисляется здесь второй раз по той же формуле: повторное вычисление проверяло бы само себя, и подмена срока у клиента прошла бы мимо теста (находка ревью задачи 6).
+        let at_the_client = call.client_wait();
         assert!(DIAL_WAIT < at_the_door, "срок двери обязан пережить само дело: {DIAL_WAIT:?} против {at_the_door:?}");
         assert!(at_the_door < at_the_client, "срок клиента обязан пережить дверь: {at_the_door:?} против {at_the_client:?}");
         assert_eq!(at_the_door - DIAL_WAIT, ASK_WAIT, "запас взят не на глазок, а обычным сроком обмена");
@@ -801,7 +824,7 @@ mod tests {
         let door = open_at(&name, &kit).expect("дверь открылась");
         let late = Answer::Code(Err("эти слова человек не увидит".into()));
         door.answers(a_doer(late, ASK_WAIT + Duration::from_secs(1)));
-        let no = ask_at(&name, &kit, Ask::Code { card: None }).expect_err("ответа не будет вовсе");
+        let no = ask_at(&name, Ask::Code { card: None }).expect_err("ответа не будет вовсе");
         assert!(no.contains("не ответил"), "клиент читает оборванный разговор, а не причину: {no}");
     }
 

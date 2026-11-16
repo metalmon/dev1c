@@ -3587,15 +3587,8 @@ mod tests {
     /// То, чем на каждой платформе реально закреплён признак обслуживания —
     /// тот же приём, что в `orphan.rs`/`allow.rs` (не общий, дублирован тем
     /// же порядком, что и прочие мелкие тестовые помощники этого крейта).
-    #[cfg(windows)]
     fn take_serving_for_test(kit: &Kit, user: &str) -> crate::single_instance::Guard {
         crate::single_instance::acquire_serving(kit, user).unwrap().expect("признак свободен в начале теста")
-    }
-    #[cfg(not(windows))]
-    fn take_serving_for_test(kit: &Kit, _user: &str) -> crate::single_instance::Guard {
-        crate::single_instance::try_acquire("", &crate::single_instance::lock_target(kit))
-            .unwrap()
-            .expect("признак свободен в начале теста")
     }
 
     /// Тот же тик — `true`, когда признак на диске «on» и признак

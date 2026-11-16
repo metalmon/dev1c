@@ -1,4 +1,4 @@
-//! Кадрирование и управляющие сообщения канала.
+//! Кадрирование и управляющие сообщения канала. Кадр с задачи 5 плана «Сопряжение переезжает в бек» возит и вопросы управляющей двери (`door`): правило упаковки в продукте одно, а словарь сообщений (`Msg`) остался словарём канала — см. докстроку `Frame`.
 //!
 //! Одно правило на все потоки канала: **заголовок кадрирован, тело — нет**.
 //! Кадр — длина `u32` старшим байтом вперёд, затем JSON. Варинт сэкономил бы
@@ -775,6 +775,12 @@ pub enum Msg {
 ///
 /// Состояния у кадрирования нет — отсюда и пустой тип: длина в заголовке, и
 /// недочитанного буфера между вызовами не остаётся.
+///
+/// **Полезная нагрузка — любая, и это решение ведущего (задача 5 плана «Сопряжение переезжает в бек»).** Кадром возятся сообщения
+/// канала между машинами (`Msg`) и вопросы с ответами управляющей двери (`door::Ask`/`door::Answer`); второго способа упаковки в
+/// продукте не заводим — он разошёлся бы с первым при первой же правке. Словарь ОТКАЗОВ при этом остался словарём сопряжения
+/// (`Refuse`): дверь берёт из него причину в хвост своих слов (`door::not_answered`), а чужие слова про «тот компьютер» наружу не
+/// пускает.
 pub struct Frame;
 
 impl Frame {
@@ -783,7 +789,7 @@ impl Frame {
     /// Свой перебор — тоже отказ, и до провода не доходит ни байта: приёмник
     /// на той стороне закрыл бы канал, и человек увидел бы обрыв вместо нашей
     /// ошибки.
-    pub async fn write<W: AsyncWrite + Unpin>(w: &mut W, msg: &Msg) -> Result<(), Refuse> {
+    pub async fn write<W: AsyncWrite + Unpin, T: Serialize>(w: &mut W, msg: &T) -> Result<(), Refuse> {
         let body = serde_json::to_vec(msg).map_err(|e| Refuse::new(code::MALFORMED, format!("сообщение не собралось в JSON: {e}")))?;
         if body.len() > LIMIT {
             return Err(Refuse::new(
@@ -819,7 +825,7 @@ impl Frame {
     /// повод сказать человеку, что та сторона не отвечает. Общий срок внутри
     /// `read` сломал бы первое, чтобы починить второе. Оборачивайте вызов в
     /// `tokio::time::timeout` там, где ждать нечего.
-    pub async fn read<R: AsyncRead + Unpin>(r: &mut R) -> Result<Msg, Refuse> {
+    pub async fn read<R: AsyncRead + Unpin, T: serde::de::DeserializeOwned>(r: &mut R) -> Result<T, Refuse> {
         // Своими руками, а не `read_exact`: тот на обрыве не говорит, сколько
         // успел прочитать, а по буферу этого не узнать — заголовок ЛЮБОГО
         // сообщения короче 64 КиБ начинается с двух нулей, и все наши
@@ -1008,7 +1014,7 @@ mod tests {
             let mut wire: Vec<u8> = Vec::new();
             Frame::write(&mut wire, &msg).await.unwrap();
             let mut back = Cursor::new(wire);
-            let read = Frame::read(&mut back).await.unwrap();
+            let read = Frame::read::<_, Msg>(&mut back).await.unwrap();
             assert_eq!(read, msg, "сообщение не доехало тем же");
             assert_eq!(back.position() as usize, back.get_ref().len(), "кадр прочитан не целиком: следующий начнётся не с начала");
         }
@@ -1021,7 +1027,7 @@ mod tests {
         // здесь и доказывает, что до тела дело не дошло.
         let header = ((LIMIT + 1) as u32).to_be_bytes();
         let mut wire = Cursor::new(header.to_vec());
-        let no = Frame::read(&mut wire).await.unwrap_err();
+        let no = Frame::read::<_, Msg>(&mut wire).await.unwrap_err();
         assert_eq!(no.code, code::OVERFLOW, "ждали отказ «перебор», получили: {no:?}");
         assert!(no.text.contains("1 МБ"), "в отказе обязан быть назван предел словами: {}", no.text);
     }
@@ -1029,10 +1035,10 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_field_is_ignored_but_an_unknown_message_is_refused() {
         let good = br#"{"msg":"enroll_wait","what_is_this":{"deep":[1,2,3]}}"#;
-        assert_eq!(Frame::read(&mut Cursor::new(framed(good))).await.unwrap(), Msg::EnrollWait);
+        assert_eq!(Frame::read::<_, Msg>(&mut Cursor::new(framed(good))).await.unwrap(), Msg::EnrollWait);
 
         let strange = br#"{"msg":"dance","base_id":"b1"}"#;
-        let no = Frame::read(&mut Cursor::new(framed(strange))).await.unwrap_err();
+        let no = Frame::read::<_, Msg>(&mut Cursor::new(framed(strange))).await.unwrap_err();
         assert_eq!(no.code, code::UNKNOWN_MESSAGE, "незнакомое сообщение — отказ словами, а не тишина");
         assert!(no.text.contains("dance"), "отказ обязан назвать, чего не понял: {}", no.text);
     }
@@ -1040,18 +1046,18 @@ mod tests {
     #[tokio::test]
     async fn a_truncated_frame_is_refused_not_hung() {
         // Обрыв в середине заголовка.
-        let no = Frame::read(&mut Cursor::new(vec![0u8, 0, 4])).await.unwrap_err();
+        let no = Frame::read::<_, Msg>(&mut Cursor::new(vec![0u8, 0, 4])).await.unwrap_err();
         assert_eq!(no.code, code::BROKEN);
 
         // Обрыв в середине тела: заголовок обещает 32 байта, пришло 5.
         let mut wire = 32u32.to_be_bytes().to_vec();
         wire.extend_from_slice(b"{\"msg\"");
-        let no = Frame::read(&mut Cursor::new(wire)).await.unwrap_err();
+        let no = Frame::read::<_, Msg>(&mut Cursor::new(wire)).await.unwrap_err();
         assert_eq!(no.code, code::BROKEN);
 
         // Пустой поток — это не обрыв, а честный конец: та сторона закрыла
         // поток, и звать это поломкой значит пугать человека на ровном месте.
-        let no = Frame::read(&mut Cursor::new(Vec::new())).await.unwrap_err();
+        let no = Frame::read::<_, Msg>(&mut Cursor::new(Vec::new())).await.unwrap_err();
         assert_eq!(no.code, code::CLOSED);
     }
 
@@ -1062,9 +1068,9 @@ mod tests {
     /// подключитесь заново».
     #[tokio::test]
     async fn a_header_of_zeros_cut_short_is_an_interruption_not_a_farewell() {
-        let no = Frame::read(&mut Cursor::new(vec![0u8, 0])).await.unwrap_err();
+        let no = Frame::read::<_, Msg>(&mut Cursor::new(vec![0u8, 0])).await.unwrap_err();
         assert_eq!(no.code, code::BROKEN, "два нуля и обрыв — это обрыв, а не прощание");
-        let no = Frame::read(&mut Cursor::new(vec![0u8])).await.unwrap_err();
+        let no = Frame::read::<_, Msg>(&mut Cursor::new(vec![0u8])).await.unwrap_err();
         assert_eq!(no.code, code::BROKEN, "один байт — тоже начатый кадр");
     }
 
@@ -1082,7 +1088,7 @@ mod tests {
     async fn a_hello_from_an_older_kit_is_refused_in_words() {
         let old =
             r#"{"msg":"hello","proto_min":1,"proto_max":1,"side":"with_agents","kit":"0.0.9","says_name":"Ромашка","ceiling":"full"}"#;
-        let no = Frame::read(&mut Cursor::new(framed(old.as_bytes()))).await.unwrap_err();
+        let no = Frame::read::<_, Msg>(&mut Cursor::new(framed(old.as_bytes()))).await.unwrap_err();
         assert_eq!(no.code, code::MALFORMED, "отказ, а не молчаливое согласие с непонятым: {no:?}");
         assert!(no.text.contains("обновите"), "и совет обязан годиться расхождению версий, а не только журналу: {}", no.text);
         // А та же сборка со своим полем читается как обычно — иначе тест
@@ -1102,7 +1108,7 @@ mod tests {
     #[tokio::test]
     async fn a_state_message_from_an_older_kit_is_refused_in_words() {
         let old = br#"{"msg":"state","base_id":"b1","state":"connected","write":true,"serving":true}"#;
-        let no = Frame::read(&mut Cursor::new(framed(old))).await.unwrap_err();
+        let no = Frame::read::<_, Msg>(&mut Cursor::new(framed(old))).await.unwrap_err();
         assert_eq!(no.code, code::UNKNOWN_MESSAGE, "снятое сообщение — незнакомое, а не неразобравшееся: {no:?}");
         assert!(no.text.contains("state"), "отказ обязан назвать, чего не понял: {}", no.text);
         assert!(no.text.contains("Обновите"), "и посоветовать то, что поможет: {}", no.text);

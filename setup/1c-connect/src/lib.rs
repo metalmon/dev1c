@@ -12,6 +12,8 @@ pub mod channel;
 pub mod contract;
 /// Подробный журнал шагов рукопожатия — по переменной `DEV1C_DEBUG` (просьба владельца 15.11).
 pub mod debug;
+/// Управляющая дверь живого экземпляра — без фичи `gui`: дверь нужна прежде всего командной строке (задача 5 плана «Сопряжение переезжает в бек»).
+pub mod door;
 pub mod editors;
 pub mod enroll;
 pub mod enrolled;

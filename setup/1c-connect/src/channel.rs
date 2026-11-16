@@ -808,8 +808,8 @@ mod tests {
 
         let (their_channel, mut their_first, mut their_second) =
             tokio::time::timeout(WAIT, answered).await.expect("та сторона не приняла оба потока в срок").unwrap();
-        assert_eq!(Frame::read(their_first.ear()).await.unwrap(), Msg::EnrollWait);
-        assert_eq!(Frame::read(their_second.ear()).await.unwrap(), Msg::EnrollWait);
+        assert_eq!(Frame::read::<_, Msg>(their_first.ear()).await.unwrap(), Msg::EnrollWait);
+        assert_eq!(Frame::read::<_, Msg>(their_second.ear()).await.unwrap(), Msg::EnrollWait);
         assert_eq!(their_channel.peer(), caller.id(), "у канала два конца, и оба знают, кто на том");
 
         // Первая карточка прощается и закрывает свой поток.
@@ -824,7 +824,7 @@ mod tests {
         let said = Msg::EnrollWait;
         Frame::write(their_second.says(), &said).await.unwrap();
         assert_eq!(
-            tokio::time::timeout(WAIT, Frame::read(second.ear())).await.expect("соседняя карточка замолчала").unwrap(),
+            tokio::time::timeout(WAIT, Frame::read::<_, Msg>(second.ear())).await.expect("соседняя карточка замолчала").unwrap(),
             said,
             "соседняя карточка обязана жить дальше"
         );
@@ -877,7 +877,7 @@ mod tests {
             .await
             .expect("второй звонок завёл ВТОРОЕ соединение: та сторона не дождалась второго потока в первом")
             .unwrap();
-        assert_eq!(Frame::read(their_one.ear()).await.unwrap(), Msg::EnrollWait);
+        assert_eq!(Frame::read::<_, Msg>(their_one.ear()).await.unwrap(), Msg::EnrollWait);
 
         one.end(None).await;
         assert!(first.is_open(), "канал закрылся со снятием одного потока — значит второй потоком в нём не ехал");
@@ -913,7 +913,7 @@ mod tests {
                     let said = said.clone();
                     async move {
                         assert_eq!(whom, dialled, "разговору отдают ключ ТОЙ стороны, иначе ему нечем решать допуск");
-                        if let Ok(msg) = Frame::read(control.ear()).await {
+                        if let Ok(msg) = Frame::read::<_, Msg>(control.ear()).await {
                             said.lock().unwrap().push(format!("{msg:?}"));
                         }
                         control.bye(Refuse::new(code::MCP_OFF, SERVING_OFF)).await;
@@ -1171,7 +1171,7 @@ mod tests {
             let channel = there.keep(conn);
             let mut control = channel.answer().await.unwrap();
             let _ = wait.await;
-            Frame::read(control.ear()).await
+            Frame::read::<_, Msg>(control.ear()).await
         });
 
         let channel = tokio::time::timeout(WAIT, mine.to(&caller, by_loopback(&base))).await.expect("дозвон не уложился").unwrap();
@@ -1246,7 +1246,7 @@ mod tests {
         let said = Msg::EnrollWait;
         assert!(second_reins.say(said.clone()).await, "вожжи соседней карточки обязаны быть живы");
         assert_eq!(
-            tokio::time::timeout(WAIT, Frame::read(second.ear())).await.expect("соседняя карточка замолчала").unwrap(),
+            tokio::time::timeout(WAIT, Frame::read::<_, Msg>(second.ear())).await.expect("соседняя карточка замолчала").unwrap(),
             said,
             "соседняя карточка говорит дальше"
         );

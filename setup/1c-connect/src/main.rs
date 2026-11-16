@@ -17,7 +17,7 @@ use one_c_connect::gate;
 #[cfg(feature = "gui")]
 use one_c_connect::gui::Start;
 use one_c_connect::ops_host::{self, Ctx, McpServer};
-use one_c_connect::{allow, cfg, flow, journal, licence, peer, peer_out, project, session, single_instance, verify};
+use one_c_connect::{allow, cfg, door, flow, journal, licence, peer, peer_out, project, session, single_instance, verify};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -260,6 +260,20 @@ fn run() -> Result<()> {
             println!();
             for (id, title, st) in common::run::status(&ctx, &ops) {
                 println!("  {:<16} {:<26} {}", id, title, st.label());
+            }
+            println!();
+            // Дверь — последней строкой и первым клиентом: всё выше прочитано с диска и печатается всегда, а здесь впервые говорит ЖИВОЙ экземпляр. Разница названа словами нарочно: иначе человек не поймёт, свежее он видит или лежалое — а `status` он набирает ровно за этим.
+            match door::ask(&ctx.kit, door::Ask::Status) {
+                Ok(door::Answer::Status(v)) => {
+                    let on = if v.serving { "включён" } else { "выключен" };
+                    println!("Отвечает живой экземпляр: {} {on}.", one_c_connect::SUBJECT);
+                    // Карточка без состояния контракта своей строки не получает вовсе — так же, как в списке окна (`contract::contract_word` отдаёт `None`), и слова за неё дверь не выдумывает.
+                    for c in &v.cards {
+                        println!("  {:<16} {}", c.name, c.word);
+                    }
+                }
+                // Слова отказа — те самые, что живут в `door::NO_BACK_END`; второй их формулировки здесь нет.
+                Err(why) => println!("{why}.\nПоказанное выше прочитано с диска."),
             }
             println!();
             println!("Установить: 1c-connect install. Подключиться: 1c-connect connect. Выгрузить из 1С: 1c-connect export.");
@@ -555,6 +569,13 @@ fn serve(ctx: &Ctx) -> Result<()> {
     // комментарий там.
     let _ = allow::write(&ctx.kit, true);
     let _off = OffOnExit(&ctx.kit);
+    // Управляющая дверь — раньше публикации и сеанса: набранная команда обязана застать её открытой с первого мига, а не с того, как поднялось обслуживание (публикация одна умеет ждать порт секундами). Отказ двери переживаем словами (`open_or_say`, журнал и экран): обслуживание вызовов от неё не зависит, а молчать о ней нельзя — `status` сказал бы «бек не запущен» при живом беке.
+    let door = door::open_or_say(&ctx.kit);
+    // Первый снимок — сразу, не дожидаясь первой же перемены в сеансе: до неё дверь отвечала бы умолчанием, то есть «не обслуживает» при поднятом обслуживании.
+    let card = ctx.cfg.current().name.clone();
+    if let Some(d) = &door {
+        d.show(status_view(&card, &session::State::Off));
+    }
     // Без сеанса на стенде никто больше базу не публикует (см. спеку
     // «HTTP-сервис базы ведёт коннектор») — поднимаем её перед тем, как
     // начать слушать, тем же сервисом, что умрёт вместе с этим процессом
@@ -574,8 +595,17 @@ fn serve(ctx: &Ctx) -> Result<()> {
     }
     // Узел держится до конца функции, а не до конца проводки — см. докстроку `peer_wiring`.
     let (_node, wiring) = peer_wiring(ctx);
+    // Состояние сеанса здесь прежде никому не отдавали (`|_| {}`), и отдавать было некому: экрана у этой сборки нет. Теперь его спрашивают дверью, и снимок обновляется на каждую перемену — так `status` с другой машины видит связь, а не последнее, что успел напечатать терминал.
+    let on_state = {
+        let (door, card) = (door.clone(), card.clone());
+        move |st: session::State| {
+            if let Some(d) = &door {
+                d.show(status_view(&card, &st));
+            }
+        }
+    };
     let mut s =
-        session::start_with_enabled(ctx.cfg.clone(), ctx.kit.clone(), ctx.sink.clone(), Arc::new(AtomicBool::new(true)), wiring, |_| {});
+        session::start_with_enabled(ctx.cfg.clone(), ctx.kit.clone(), ctx.sink.clone(), Arc::new(AtomicBool::new(true)), wiring, on_state);
     let rt = tokio::runtime::Runtime::new()?;
     let r = rt.block_on(async {
         // Условный атрибут внутри `select!` макрос не принимает, поэтому
@@ -603,6 +633,17 @@ fn serve(ctx: &Ctx) -> Result<()> {
     r?;
     stopped?;
     Ok(())
+}
+
+/// Что рассказывает о себе дверь `serve`: обслуживание включено (иначе эта команда не стартовала бы — холодный замок отказал бы её же словами выше), а слово про связь — из `contract::contract_word` и ниоткуда больше.
+///
+/// **Почему `Enroll::default()` здесь честен.** Заявок и потоков отдельных карточек эта подкоманда не видит вовсе: `peer_wiring` молчит про `Out::Enroll` и `Out::Flow` нарочно — показать заявку и спросить человека ей нечем, и слово о них за командами сопряжения (задачи 6–9 плана). Единственное, что `serve` про связь знает, — состояние транспорта, и оно сюда и приходит. Карточка без состояния контракта строки не получает: `contract_word` отдаёт `None`, и дверь слова за неё не выдумывает.
+#[cfg(not(feature = "gui"))]
+fn status_view(card: &str, st: &session::State) -> door::StatusView {
+    use one_c_connect::contract::{contract_of, contract_word, Enroll};
+    let word = contract_of(Some(st), &Enroll::default()).and_then(contract_word);
+    let cards = word.map(|w| vec![door::CardState { name: card.to_string(), word: w.to_string() }]).unwrap_or_default();
+    door::StatusView { serving: true, cards }
 }
 
 #[cfg(test)]
@@ -672,5 +713,19 @@ mod tests {
     fn a_successful_publication_has_nothing_to_report() {
         let ok: Result<()> = Ok(());
         assert!(publication_failure_text(&ok).is_none());
+    }
+
+    /// Снимок за дверью `serve` говорит словами ОБЩЕГО словаря (`contract_word`), а не своими: ровно за этим словарь и переезжал в бек. Проверяются оба исхода — состояние, у которого слово есть, и состояние, у которого его нет.
+    #[cfg(not(feature = "gui"))]
+    #[test]
+    fn the_door_of_serve_names_the_link_with_the_shared_dictionary() {
+        let up = status_view("Ромашка", &session::State::Up { since: std::time::Instant::now() });
+        assert!(up.serving, "набранный serve обслуживает — иначе он бы не стартовал");
+        assert_eq!(up.cards.len(), 1, "у карточки есть что сказать о связи");
+        assert_eq!(up.cards[0].name, "Ромашка");
+        assert_eq!(up.cards[0].word, one_c_connect::contract::contract_word(one_c_connect::contract::Contract::Up).unwrap());
+        let off = status_view("Ромашка", &session::State::Off);
+        assert!(off.serving, "обслуживание включено и до первого подключения");
+        assert!(off.cards.is_empty(), "без состояния контракта карточка строки не получает");
     }
 }

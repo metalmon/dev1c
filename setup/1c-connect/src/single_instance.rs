@@ -417,9 +417,9 @@ fn show_event_name(key: &str) -> String {
     format!("1c-connect-show-{key}")
 }
 
-/// Нуль-терминированная широкая строка — её хочет каждый именованный объект ядра здесь.
+/// Нуль-терминированная широкая строка — её хочет каждый именованный объект ядра здесь. `pub(crate)`: того же требуют права управляющей двери (`door::Rights`, SDDL строкой), а второй такой же перевод рядом был бы ровно «две меры на один вопрос».
 #[cfg(windows)]
-fn wide(s: &str) -> Vec<u16> {
+pub(crate) fn wide(s: &str) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
     std::ffi::OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
 }

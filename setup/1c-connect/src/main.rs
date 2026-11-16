@@ -264,12 +264,10 @@ fn run() -> Result<()> {
             println!();
             // Дверь — последней строкой и первым клиентом: всё выше прочитано с диска и печатается всегда, а здесь впервые говорит ЖИВОЙ экземпляр. Разница названа словами нарочно: иначе человек не поймёт, свежее он видит или лежалое — а `status` он набирает ровно за этим.
             match door::ask(&ctx.kit, door::Ask::Status) {
+                // Слова — в `door::status_lines` и только там: там же их проверяет тест, который держит разницу «о связи пока не сообщает» и «связей нет». Карточка без состояния контракта своей строки не получает вовсе — так же, как в списке окна (`contract::contract_word` отдаёт `None`), и слова за неё дверь не выдумывает.
                 Ok(door::Answer::Status(v)) => {
-                    let on = if v.serving { "включён" } else { "выключен" };
-                    println!("Отвечает живой экземпляр: {} {on}.", one_c_connect::SUBJECT);
-                    // Карточка без состояния контракта своей строки не получает вовсе — так же, как в списке окна (`contract::contract_word` отдаёт `None`), и слова за неё дверь не выдумывает.
-                    for c in &v.cards {
-                        println!("  {:<16} {}", c.name, c.word);
+                    for line in door::status_lines(&v) {
+                        println!("{line}");
                     }
                 }
                 // Слова отказа — те самые, что живут в `door::NO_BACK_END`; второй их формулировки здесь нет.
@@ -642,8 +640,9 @@ fn serve(ctx: &Ctx) -> Result<()> {
 fn status_view(card: &str, st: &session::State) -> door::StatusView {
     use one_c_connect::contract::{contract_of, contract_word, Enroll};
     let word = contract_of(Some(st), &Enroll::default()).and_then(contract_word);
+    // `Some`, а не `None`: эта подкоманда о связи СООБЩАЕТ — пустой список здесь значит «связей нет», и это правда, а не незнание (разница названа типом, см. `door::StatusView::cards`).
     let cards = word.map(|w| vec![door::CardState { name: card.to_string(), word: w.to_string() }]).unwrap_or_default();
-    door::StatusView { serving: true, cards }
+    door::StatusView { serving: true, cards: Some(cards) }
 }
 
 #[cfg(test)]
@@ -721,11 +720,12 @@ mod tests {
     fn the_door_of_serve_names_the_link_with_the_shared_dictionary() {
         let up = status_view("Ромашка", &session::State::Up { since: std::time::Instant::now() });
         assert!(up.serving, "набранный serve обслуживает — иначе он бы не стартовал");
-        assert_eq!(up.cards.len(), 1, "у карточки есть что сказать о связи");
-        assert_eq!(up.cards[0].name, "Ромашка");
-        assert_eq!(up.cards[0].word, one_c_connect::contract::contract_word(one_c_connect::contract::Contract::Up).unwrap());
+        let cards = up.cards.expect("эта подкоманда о связи СООБЩАЕТ, а не молчит");
+        assert_eq!(cards.len(), 1, "у карточки есть что сказать о связи");
+        assert_eq!(cards[0].name, "Ромашка");
+        assert_eq!(cards[0].word, one_c_connect::contract::contract_word(one_c_connect::contract::Contract::Up).unwrap());
         let off = status_view("Ромашка", &session::State::Off);
         assert!(off.serving, "обслуживание включено и до первого подключения");
-        assert!(off.cards.is_empty(), "без состояния контракта карточка строки не получает");
+        assert_eq!(off.cards, Some(vec![]), "связей нет — и это сказано, а не умолчано: `Some` пустой, не `None`");
     }
 }

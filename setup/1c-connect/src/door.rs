@@ -8,7 +8,7 @@
 //!
 //! **Разница осей живёт в ОДНОМ месте — в адресе двери** (`pipe_path` на Windows, `sock_path`/`runtime_dir` на Linux), и выше неё про платформу не знает никто. Общего примитива здесь нет и быть не может: именованные объекты ядра Windows по умолчанию живут в сеансе, а у файловой системы Linux сеансов нет вовсе. Всё остальное — поведение, и оно на осях одно.
 //!
-//! **Почему у двери явный дескриптор прав, а не умолчание.** Тем же абзацем спека отличает канал от порта на петле: «канал с правами учётной записи отвечает на вопрос „кто это“ средствами ОС, а не нашими догадками». Канал, созданный без дескриптора, этого не делает: умолчание пускает к нему больше, чем нас, и тогда дверь ничем не лучше порта — а по ней поедут разрешения человека (`allow`/`decline`, задача 7 плана), то есть чужое «разрешить» вместо хозяйского. Поэтому прав ровно двое: наша учётная запись (её SID) и SYSTEM, наследование запрещено (`D:P`). На Linux то же делают права на сам сокет (0600) и проверка `SO_PEERCRED`.
+//! **Почему у двери явный дескриптор прав, а не умолчание.** Тем же абзацем спека отличает канал от порта на петле: «канал с правами учётной записи отвечает на вопрос „кто это“ средствами ОС, а не нашими догадками». Канал, созданный без дескриптора, этого не делает: умолчание пускает к нему больше, чем нас, и тогда дверь ничем не лучше порта — а по ней ездят разрешения человека (`allow`/`decline`, задача 7), то есть чужое «разрешить» вместо хозяйского. Поэтому прав ровно двое: наша учётная запись (её SID) и SYSTEM, наследование запрещено (`D:P`). На Linux то же делают права на сам сокет (0600) и проверка `SO_PEERCRED`.
 //!
 //! **Охрана у двери двусторонняя, и это не перестраховка.** Дескриптор и `first_pipe_instance` защищают от того, кто придёт ПОСЛЕ нас; самозванец, успевший создать канал ПЕРВЫМ, нашему беку дверь открыть не даст (и тот скажет об этом словами — `NAME_TAKEN`), а вот клиента принял бы охотно. Поэтому и клиент спрашивает ОС, чей процесс держит сервер, и при расхождении отказывает словами (`STRANGER_DOOR`).
 //!
@@ -18,7 +18,7 @@
 //!
 //! **Дверь не поднимает бека.** Клиент, не нашедший живого, говорит слова (`NO_BACK_END`) и уходит: иначе человек получил бы вторую, невидимую копию продукта — ровно то, что весь день 15.11 мешало открыть настоящее окно.
 //!
-//! Каким кодом уходить — дело КЛИЕНТА, а не двери, и клиенты тут разные. `status` без живого успешен (код 0): он напечатал состояние с диска, за которым человек и пришёл, а отсутствие живого — такое же сведение, как остальные его строки. Командам, которым дверь нужна по существу (`code` и `dial` — задача 6; `allow`, `decline` — задача 7 плана), отсутствие живого значит «сделать не удалось», и уходить им положено ненулевым кодом (решение ведущего, круг правок 2).
+//! Каким кодом уходить — дело КЛИЕНТА, а не двери, и клиенты тут разные. `status` без живого успешен (код 0): он напечатал состояние с диска, за которым человек и пришёл, а отсутствие живого — такое же сведение, как остальные его строки. Командам, которым дверь нужна по существу (`code` и `dial` — задача 6; `requests`, `allow`, `decline` — задача 7), отсутствие живого значит «сделать не удалось», и уходить им положено ненулевым кодом (решение ведущего, круг правок 2).
 //!
 //! **Дверь не только рассказывает, но и ДЕЛАЕТ** (задача 6). Снимок состояния она отдаёт сама, а всё остальное — исполнитель держателя (`Serves`, ставится `Door::answers`): у него ручка на живой узел и общий с окном запас выданных кодов, то есть ровно то, чего на диске нет. Исполнитель один на оба пути подъёма (`serves`), потому что клиенты у двери одни.
 
@@ -54,7 +54,7 @@ const ASK_WAIT: Duration = Duration::from_secs(5);
 /// Сколько отмерено самому ЗВОНКУ — одна мера, из которой выведены все остальные сроки вокруг него (`Ask::wait` у двери, ожидание клиента, строка предупреждения `main.rs::DIAL_MINUTES`). Звонок ждёт ЧЕЛОВЕКА у чужого экрана, и сроки у этого ожидания уже посчитаны зачислением: принимающая сторона отмеряет на решение `DECISION`, зовущая — его же плюс `PATIENCE` на саму пересылку (см. их докстроки). Своего числа здесь не заводим — оно разошлось бы с их при первой же правке сроков.
 pub const DIAL_WAIT: Duration = crate::enroll::DECISION.saturating_add(crate::enroll::PATIENCE);
 
-/// О чём клиент спрашивает живого. Задачи 7–9 плана добавят сюда свои случаи (`requests`, `allow`, `decline`, `peers`, `revoke`); `Status` первый, потому что ничего не меняет.
+/// О чём клиент спрашивает живого. Задача 9 плана добавит сюда свои случаи (`peers`, `revoke`); `Status` первый, потому что ничего не меняет.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Ask {
     Status,
@@ -69,6 +69,17 @@ pub enum Ask {
         code: String,
         card: Option<String>,
     },
+    /// Кто сейчас просит разрешения подключиться. Ничего не меняет, как и `Status`, — но спрашивается у держателя: заявки живут в его
+    /// памяти (`enroll::Requests`), на диске их нет и быть не может.
+    Requests,
+    /// Ответить одной заявке — решением человека и ничьим больше (закон 6 спеки: автоматического разрешения в продукте нет).
+    ///
+    /// Адресуется ОТПЕЧАТКОМ той стороны, а не номером в списке: номер сдвигается между двумя набранными командами, а отпечаток не
+    /// меняется — и по телефону голосом сверяют именно его (спека, раздел 5, пункт 5).
+    Answer {
+        fingerprint: String,
+        decision: crate::enroll::Decision,
+    },
 }
 
 impl Ask {
@@ -81,7 +92,9 @@ impl Ask {
     /// Чем это куплено (находка ревью круга 1, Major 1). Истёкший срок двери — это оборванный разговор: клиент читает «живой экземпляр не ответил (причина: closed)», то есть **диагноз о своём беке там, где виновата та машина**. Настоящие слова («ответа так и не было, проверьте, запущена ли программа на том компьютере») лежат в `dial_for` и были бы недостижимы. Ровно так и срывается утренний живой прогон: человек звонит, та сторона молчит, а программа винит его собственную.
     fn wait(&self) -> Duration {
         match self {
-            Ask::Status | Ask::Code { .. } => ASK_WAIT,
+            // Заявки и ответ на заявку живого не ЖДУТ: список лежит у него в памяти, а ответ — это одна посылка в уже открытый канал
+            // решения. Своего срока им не заводим (решение ведущего, задача 7): мера обычного вопроса на то и обычная.
+            Ask::Status | Ask::Code { .. } | Ask::Requests | Ask::Answer { .. } => ASK_WAIT,
             Ask::Dial { .. } => DIAL_WAIT.saturating_add(ASK_WAIT),
         }
     }
@@ -100,6 +113,30 @@ pub enum Answer {
     Status(StatusView),
     Code(Result<crate::codes::Issued, String>),
     Dialled(Result<crate::enroll::Outcome, String>),
+    /// Кто просит разрешения. `Err` — спросить было не у кого (узел ещё не поднялся): пустой список здесь значил бы «никто не просит»,
+    /// а это незнание, не пустота, — та же разница типом, что у `StatusView::cards`.
+    Requests(Result<Vec<RequestView>, String>),
+    /// Ответ на заявку отдан. Внутри — слова человеку в обе стороны: `Ok` печатается как есть, `Err` значит «не сделано» и уводит
+    /// команду ненулевым кодом (тот же приём, что у `dialled_words`).
+    Done(Result<String, String>),
+}
+
+/// Одна заявка словами для списка: к какой карточке стучатся, отпечаток той стороны, как она себя назвала и сколько у человека
+/// осталось на ответ. Ровно то, что названо в спеке шагом четвёртым зачисления, и ничего сверх.
+///
+/// Готовые слова, а не сырые поля: отпечаток считает `enroll::short_key`, самоназвание — `enroll::who_says`, и обе строки едут отсюда
+/// такими же, какими их показывает окно в диалоге разрешения (`gui::save::permission_question`). Второго словаря на то же самое в
+/// командной строке не заводится (решение 7 задачи 7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestView {
+    /// Имя карточки, к которой пришла заявка, — локальное, как его видит человек в списке.
+    pub card: String,
+    /// Отпечаток той стороны — он же АДРЕС для `allow`/`decline` и то, что сверяют голосом.
+    pub fingerprint: String,
+    /// Как та сторона себя назвала — её слова, а не проверенный факт.
+    pub says_name: String,
+    /// Сколько осталось человеку на ответ (`enroll::DECISION` минус прошедшее).
+    pub left: Duration,
 }
 
 /// То, что о себе рассказывает живой экземпляр, и ТОЛЬКО это: обслуживает ли он сейчас и что со связью по карточкам. Ни одного поля про запас — задача 9 дополнит вид, когда `status` правда начнёт печатать больше; дополнять пустое дешевле, чем выпиливать лишнее.
@@ -218,13 +255,78 @@ pub const WRONG_ANSWER: &str = "живой экземпляр ответил н�
 /// Что живой УМЕЕТ — одно место на оба пути подъёма (`gui::launch` и `fn serve` в сборке без окна): клиенты у двери одни, и делать по их вопросам положено одно и то же.
 ///
 /// Берёт ровно то, чего нет на диске: ручку на живой узел и общий запас выданных кодов. Настройки, наоборот, читаются с диска на каждый вопрос — правда про соединения живёт в файле, и человек правит его при живом беке.
-pub fn serves(kit: Kit, peer: crate::peer::Peer, codes: crate::codes::Codes) -> Serves {
+pub fn serves(kit: Kit, peer: crate::peer::Peer, codes: crate::codes::Codes, requests: crate::enroll::Requests) -> Serves {
     Arc::new(move |q| match q {
         // Снимок отдаёт сама дверь (`reply`), сюда `Status` не доходит; умолчание здесь — «ничего не знаю», и выдумывать за дверь нечего.
         Ask::Status => Answer::Status(StatusView::default()),
         Ask::Code { card } => Answer::Code(issue_for(&kit, &peer, &codes, card.as_deref())),
         Ask::Dial { code, card } => Answer::Dialled(dial_for(&kit, &peer, &code, card.as_deref())),
+        Ask::Requests => Answer::Requests(Ok(waiting_now(&requests))),
+        Ask::Answer { fingerprint, decision } => Answer::Done(answer_for(&requests, &codes, &fingerprint, decision)),
     })
+}
+
+/// Кто просит разрешения ПРЯМО СЕЙЧАС — только те заявки, на которые ещё можно ответить (`Pending::reachable`).
+///
+/// Истёкшая и отвеченная живыми не показываются, и мера у этого одна, та же, что у экрана: заявка, которой некуда ответить, не
+/// поднимает строку первой и не зажигает «Разрешить». Своего счётчика срока здесь нет — `left` только рассказывает, сколько от
+/// `enroll::DECISION` осталось (см. `Pending::left`).
+pub fn waiting_now(requests: &crate::enroll::Requests) -> Vec<RequestView> {
+    requests
+        .lock()
+        .iter()
+        .filter(|p| p.reachable())
+        .map(|p| RequestView {
+            card: p.request.card_name.clone(),
+            fingerprint: crate::enroll::short_key(&p.request.peer.to_string()),
+            says_name: crate::enroll::who_says(&p.request.says_name),
+            left: p.left(),
+        })
+        .collect()
+}
+
+/// Ответить заявке по отпечатку и сделать то, что из ответа следует.
+///
+/// Следствие ровно одно и оно общее с окном: дошедшее РАЗРЕШЕНИЕ гасит код карточки (`codes::Codes::forget` — там правило целиком).
+/// Книгу допуска здесь не трогают вовсе: разрешение записывает сам разговор на шаге пятом, и второго места записи в продукте нет.
+///
+/// Слова — у окна (`enroll::answered`), и вид возврата говорит о коде выхода: `Err` значит «сделать не удалось» (заявки нет, их две,
+/// отвечать уже некуда), и набранная команда уходит ненулевым кодом — тем же правилом, что `dial`.
+pub fn answer_for(
+    requests: &crate::enroll::Requests,
+    codes: &crate::codes::Codes,
+    fingerprint: &str,
+    d: crate::enroll::Decision,
+) -> Result<String, String> {
+    let done = requests.answer(fingerprint, d).map_err(str::to_string)?;
+    if done.sent && d == crate::enroll::Decision::Allow {
+        codes.forget(&done.card);
+    }
+    let (kind, text) = crate::enroll::answered(&done.name, d, done.sent);
+    if done.sent {
+        Ok(text)
+    } else {
+        // Разряд складывает `answered`, и спорить с ним нечем: беда — это «не сделано», и человеку на неё нужен ненулевой код.
+        debug_assert_eq!(kind, crate::journal::Kind::Warn);
+        Err(text)
+    }
+}
+
+/// Список заявок человеку — строками, и здесь, а не в `main.rs`: тот же довод, что у `status_lines`, — слова проверяет тест.
+///
+/// Пустой список получает СЛОВА, а не пустоту: молчаливый ответ человек прочёл бы как «команда не сработала» (ограничение
+/// «молчаливого ответа не бывает»). Отпечаток стоит первым и своей колонкой — им же и отвечают, и его же сверяют голосом.
+pub fn request_lines(v: &[RequestView]) -> Vec<String> {
+    if v.is_empty() {
+        return vec!["Разрешения сейчас никто не просит.".into()];
+    }
+    let mut out = vec![format!("Просят разрешения подключиться ({}):", v.len())];
+    out.extend(
+        v.iter()
+            .map(|r| format!("  {:<8} {:<16} {:<24} осталось {} мин", r.fingerprint, r.card, r.says_name, r.left.as_secs().div_ceil(60))),
+    );
+    out.push("Ответить: 1c-connect allow ОТПЕЧАТОК — или decline ОТПЕЧАТОК.".into());
+    out
 }
 
 /// Настройки соединений — с ДИСКА на каждый вопрос, а не из памяти держателя: правда про соединения живёт в файле, и человек правит его при живом беке.
@@ -383,6 +485,8 @@ fn refused(q: &Ask, why: String) -> Answer {
         Ask::Status => Answer::Status(StatusView::default()),
         Ask::Code { .. } => Answer::Code(Err(why)),
         Ask::Dial { .. } => Answer::Dialled(Err(why)),
+        Ask::Requests => Answer::Requests(Err(why)),
+        Ask::Answer { .. } => Answer::Done(Err(why)),
     }
 }
 
@@ -638,7 +742,7 @@ async fn knock(name: &str) -> io::Result<Knock> {
 
 /// Чей процесс держит дверь, в которую мы только что постучали. Спрашивается у ОС: `GetNamedPipeServerProcessId` отдаёт процесс сервера, а владельца его токена называет `holder::owner_of_pid` — тот же способ, которым продукт уже отвечает на «чей это процесс» и себе (`single_instance::account`), и стражу порта. Второго правила здесь не заводим, и на ОБЕИХ осях: сравнение владельцев — одно (`holder::same_owner`), добыча своего — одна (`account`).
 ///
-/// **Зачем проверка, когда есть дескриптор.** Дескриптор и `first_pipe_instance` держат только тех, кто придёт ПОСЛЕ нас. Самозванец, успевший создать канал ПЕРВЫМ, нашему беку дверь открыть не даст — но клиента примет, и команда отдала бы ему вопрос, а с задачи 7 плана и разрешение человека. Поэтому обе стороны проверяют друг друга, и это не перестраховка, а два разных случая.
+/// **Зачем проверка, когда есть дескриптор.** Дескриптор и `first_pipe_instance` держат только тех, кто придёт ПОСЛЕ нас. Самозванец, успевший создать канал ПЕРВЫМ, нашему беку дверь открыть не даст — но клиента примет, и команда отдала бы ему вопрос, а с задачи 7 и разрешение человека. Поэтому обе стороны проверяют друг друга, и это не перестраховка, а два разных случая.
 ///
 /// Своего SID не узнали — тоже отказ: сверять не с чем, а разговаривать с неизвестным дверь не обязана.
 #[cfg(windows)]
@@ -679,7 +783,7 @@ fn ask_at(name: &str, q: Ask) -> Result<Answer, String> {
                 format!("дверь живого экземпляра не отворилась на стук: {e}")
             }
         })?;
-        // До первого же сказанного слова: вопрос чужому — это уже утечка (а с задачи 7 плана по этой двери поедет разрешение человека).
+        // До первого же сказанного слова: вопрос чужому — это уже утечка (а с задачи 7 по этой двери ездит и разрешение человека).
         server_is_ours(&stream)?;
         // Ждём РОВНО столько, сколько живому отмерено на это дело, плюс обычный срок на сам обмен (`Ask::client_wait`): уйди клиент раньше, человек прочёл бы наше «молчит» вместо настоящей причины, которую живой как раз дописывает.
         let waiting = q.client_wait();
@@ -974,6 +1078,132 @@ mod tests {
         assert!(matches!(slow.join().expect("поток звонка"), Ok(Answer::Dialled(Ok(_)))), "и сам звонок договорил");
     }
 
+    /// Заявка от ЖИВОГО разговора: канал решения настоящий, и ответ по нему правда уезжает. Декораций у заявки нет — `Pending` своего
+    /// конструктора-пустышки не имеет, и это верно: заявка без канала решения не заявка.
+    fn a_request(
+        card: &str,
+        peer: iroh::EndpointId,
+        says: &str,
+    ) -> (crate::enroll::Pending, tokio::sync::oneshot::Receiver<crate::enroll::Decision>) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let request = crate::enroll::Request {
+            card_name: card.to_string(),
+            card: card.into(),
+            base: wire::BaseFields { base_id: card.into(), base_name: "Бухгалтерия".into(), write: true },
+            peer,
+            says_name: wire::SaysName::new(says),
+        };
+        (crate::enroll::Pending::new(request, tx), rx)
+    }
+
+    fn a_key(n: u8) -> iroh::EndpointId {
+        iroh::SecretKey::from_bytes(&[n; 32]).public()
+    }
+
+    /// Исполнитель, который правда отвечает на заявки — тем же кодом, что у держателя (`waiting_now`/`answer_for`), а не выдуманным.
+    /// Узла эта половина `serves` не касается вовсе, поэтому его тут и нет: в декорации был бы смысл, если бы она подменяла поведение,
+    /// а она отдаёт то же самое.
+    fn answers_requests(requests: &crate::enroll::Requests, codes: &crate::codes::Codes) -> Serves {
+        let (requests, codes) = (requests.clone(), codes.clone());
+        Arc::new(move |q| match q {
+            Ask::Requests => Answer::Requests(Ok(waiting_now(&requests))),
+            Ask::Answer { fingerprint, decision } => Answer::Done(answer_for(&requests, &codes, &fingerprint, decision)),
+            other => panic!("этот исполнитель отвечает только про заявки: {other:?}"),
+        })
+    }
+
+    /// **На заявку отвечают ОДИН раз, и второй ответ получает отказ СЛОВАМИ** (решение 4 задачи 7).
+    ///
+    /// Два окна (или окно и набранная команда) могут нажать «Разрешить» почти одновременно, и второй обязан прочесть, что случилось,
+    /// — не получить панику, не перезаписать чужое решение и не уехать молча. Слова второму достаются те же, что говорит окно
+    /// (`enroll::answered`): отличить «уже ответили» от «разговор кончился сам» человек не может, и делать ему в обоих случаях одно
+    /// и то же. Сам `ALREADY_ANSWERED` наружу не едет — он писан тому, кто правит вызов.
+    ///
+    /// Второй ответ приезжает `Err`, а не `Ok`: для набранной команды это «сделать не удалось», и код возврата у неё не ноль.
+    #[test]
+    fn answering_the_same_request_twice_is_refused_in_words() {
+        let (_dir, kit) = kit_for_test();
+        let name = test_door("twice-answered");
+        let door = open_at(&name, &kit).expect("дверь открылась");
+        let (requests, codes) = (crate::enroll::Requests::default(), crate::codes::Codes::default());
+        let (pending, mut rx) = a_request("Ромашка", a_key(3), "Заказчик");
+        requests.take(pending);
+        door.answers(answers_requests(&requests, &codes));
+        let fp = crate::enroll::short_key(&a_key(3).to_string());
+
+        let allowed = ask_at(&name, Ask::Answer { fingerprint: fp.clone(), decision: crate::enroll::Decision::Allow });
+        let Ok(Answer::Done(Ok(said))) = allowed else { panic!("первый ответ обязан уехать: {allowed:?}") };
+        assert!(said.contains("разрешено"), "человеку сказано, чем кончилось: {said}");
+        assert_eq!(rx.try_recv().expect("решение уехало в разговор"), crate::enroll::Decision::Allow);
+
+        let again = ask_at(&name, Ask::Answer { fingerprint: fp, decision: crate::enroll::Decision::Deny });
+        let Ok(Answer::Done(Err(no))) = again else { panic!("второй ответ обязан быть отказом: {again:?}") };
+        assert!(no.contains("не удалось") && no.contains("Ромашка"), "отказ — словами и про ту карточку: {no}");
+    }
+
+    /// Отказы адресации — РАЗНЫЕ слова на разные беды (решение ведущего): «такой заявки нет» про опечатку в отпечатке, «их две» про
+    /// то, что выбрать за человека нельзя. Смешай их — и человек, набравший отпечаток с ошибкой, искал бы вторую заявку, которой нет.
+    #[test]
+    fn a_fingerprint_that_names_nobody_and_one_that_names_two_are_different_words() {
+        let (_dir, kit) = kit_for_test();
+        let name = test_door("fingerprints");
+        let door = open_at(&name, &kit).expect("дверь открылась");
+        let (requests, codes) = (crate::enroll::Requests::default(), crate::codes::Codes::default());
+        // ОДНА сторона стучится в ДВЕ карточки — случай обычный (к одному партнёру держат по карточке на базу), и отпечаток у этих
+        // двух заявок ровно один. Вытеснение их не сводит: оно смотрит на карточку И на сторону (`Requests::take`).
+        let (one, _one_rx) = a_request("Ромашка", a_key(3), "Заказчик");
+        let (two, _two_rx) = a_request("Клевер", a_key(3), "Заказчик");
+        requests.take(one);
+        requests.take(two);
+        door.answers(answers_requests(&requests, &codes));
+
+        let miss = ask_at(&name, Ask::Answer { fingerprint: "…нетакой".into(), decision: crate::enroll::Decision::Allow });
+        let Ok(Answer::Done(Err(no))) = miss else { panic!("отпечаток ничей — отказ: {miss:?}") };
+        assert_eq!(no, crate::enroll::NO_SUCH_REQUEST);
+
+        // Пустой отпечаток не называет НИКОГО, хотя хвостом подошёл бы всем: «ответить всем сразу» этой дверью не набирается.
+        let empty = ask_at(&name, Ask::Answer { fingerprint: "…".into(), decision: crate::enroll::Decision::Allow });
+        let Ok(Answer::Done(Err(no))) = empty else { panic!("пустой отпечаток — отказ: {empty:?}") };
+        assert_eq!(no, crate::enroll::NO_SUCH_REQUEST);
+
+        // Один отпечаток — две заявки: выбрать за человека нельзя, он сверял голосом одну из них.
+        let fp = crate::enroll::short_key(&a_key(3).to_string());
+        let both = ask_at(&name, Ask::Answer { fingerprint: fp, decision: crate::enroll::Decision::Allow });
+        let Ok(Answer::Done(Err(no))) = both else { panic!("два совпадения — отказ: {both:?}") };
+        assert_eq!(no, crate::enroll::AMBIGUOUS_FINGERPRINT);
+    }
+
+    /// `requests` печатает ровно то, что названо в спеке шагом четвёртым: карточка, отпечаток той стороны, как она себя назвала и
+    /// сколько осталось времени. И отвеченная заявка живой не показывается — ответить на неё уже нельзя.
+    #[test]
+    fn the_list_of_requests_says_the_four_things_and_hides_the_answered() {
+        let (_dir, kit) = kit_for_test();
+        let name = test_door("listing");
+        let door = open_at(&name, &kit).expect("дверь открылась");
+        let (requests, codes) = (crate::enroll::Requests::default(), crate::codes::Codes::default());
+        let (pending, _rx) = a_request("Ромашка", a_key(3), "Заказчик");
+        requests.take(pending);
+        door.answers(answers_requests(&requests, &codes));
+
+        let Ok(Answer::Requests(Ok(list))) = ask_at(&name, Ask::Requests) else { panic!("список обязан доехать") };
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].card, "Ромашка");
+        assert_eq!(list[0].fingerprint, crate::enroll::short_key(&a_key(3).to_string()), "отпечаток — тот же, что в окне");
+        assert_eq!(list[0].says_name, "«Заказчик»", "самоназвание — теми же словами, что в диалоге разрешения");
+        assert!(list[0].left <= crate::enroll::DECISION && list[0].left > crate::enroll::DECISION - Duration::from_secs(60));
+        let lines = request_lines(&list);
+        assert!(lines.iter().any(|l| l.contains(&list[0].fingerprint) && l.contains("Ромашка")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("allow")), "человеку сказано, чем отвечать: {lines:?}");
+
+        let fp = list[0].fingerprint.clone();
+        let answered = ask_at(&name, Ask::Answer { fingerprint: fp, decision: crate::enroll::Decision::Deny });
+        assert!(matches!(answered, Ok(Answer::Done(Ok(_)))), "{answered:?}");
+        let Ok(Answer::Requests(Ok(after))) = ask_at(&name, Ask::Requests) else { panic!("список обязан доехать") };
+        assert!(after.is_empty(), "отвеченная заявка живой не показывается: {after:?}");
+        // Пустой список получает СЛОВА, а не пустоту: молчание человек прочёл бы как «команда не сработала».
+        assert!(request_lines(&after)[0].contains("никто не просит"), "{:?}", request_lines(&after));
+    }
+
     /// Дверь открыта, а делать ещё нечем: узел поднимается не мгновенно. Отказ приезжает СЛОВАМИ и тем видом ответа, которого вопрос ждёт, — чужой вид клиент прочёл бы как `WRONG_ANSWER`, то есть сказал бы человеку про версии вместо настоящей причины.
     ///
     /// Что этот тест НЕ сторожит: общность слов с окном. Сверка константы с константой не упала бы никогда; настоящий сторож — тест окна (`gui::panel::tests::the_window_says_not_ready_in_the_shared_words`), который гонит щелчок «Подключиться» без узла и сверяет строку журнала с этой же константой.
@@ -988,6 +1218,17 @@ mod tests {
         assert_eq!(why, crate::peer::NOT_READY);
         let Ok(Answer::Dialled(Err(why))) = ask_at(&name, Ask::Dial { code: "к".into(), card: None }) else {
             panic!("отказ обязан приехать видом звонка")
+        };
+        assert_eq!(why, crate::peer::NOT_READY);
+        // Заявки без узла — это НЕЗНАНИЕ, а не пустой список: пустоту человек прочёл бы как «никто не просит» и спокойно ждал бы
+        // звонка, который уже некому принять. Разница названа типом, тем же приёмом, что у `StatusView::cards`.
+        let Ok(Answer::Requests(Err(why))) = ask_at(&name, Ask::Requests) else {
+            panic!("отказ обязан приехать видом списка заявок, а не пустым списком")
+        };
+        assert_eq!(why, crate::peer::NOT_READY);
+        let answer = Ask::Answer { fingerprint: "…1234".into(), decision: crate::enroll::Decision::Allow };
+        let Ok(Answer::Done(Err(why))) = ask_at(&name, answer) else {
+            panic!("отказ обязан приехать видом ответа на заявку")
         };
         assert_eq!(why, crate::peer::NOT_READY);
     }

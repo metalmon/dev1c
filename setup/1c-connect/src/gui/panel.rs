@@ -494,7 +494,7 @@ pub fn enroll_facts(ui: &Ui, name: &str) -> link::Enroll {
         return link::Enroll::default();
     };
     link::Enroll {
-        waiting: ui.waiting.iter().any(|p| p.request.card() == &key && p.reachable()),
+        waiting: ui.waiting.lock().iter().any(|p| p.request.card() == &key && p.reachable()),
         declined: ui.declined.iter().any(|d| d == &key),
         code_issued: ui.codes.issued(&key, now),
         enrolled: ui.book.as_ref().map_or(0, |b| b.of(&key).len()),
@@ -1696,7 +1696,7 @@ pub enum LinkAct {
 /// получает «отправить не удалось». Живая при этом ждёт ответа дальше.
 fn request_to_answer(ui: &Ui, card: &str) -> Option<crate::enroll::Request> {
     let key = key_of(ui, card)?;
-    ui.waiting.iter().find(|p| p.request.card() == &key && p.reachable()).map(|p| p.request.clone())
+    ui.waiting.lock().iter().find(|p| p.request.card() == &key && p.reachable()).map(|p| p.request.clone())
 }
 
 /// Выдать код подключения карточке — тем же местом, каким его выдаёт набранный `1c-connect code` (`codes::issue`, там всё решение и все
@@ -6971,13 +6971,13 @@ mod tests {
     /// заявкой кнопка называла состояние связи.
     #[test]
     fn a_hanging_request_puts_allow_on_the_main_button() {
-        let mut ui = ui_for("accept", "tunnel", false);
+        let ui = ui_for("accept", "tunnel", false);
         let card = ui.cfg.current().name.clone();
         // Приёмник держится живым до конца теста: заявка, на которую некому
         // отвечать, кнопку «Разрешить» не зажигает вовсе (Important 2
         // ревью) — и это проверяет сосед ниже.
         let (tx, _rx) = tokio::sync::oneshot::channel();
-        ui.waiting.push(crate::gui::Pending::new(a_waiting_request(ui.cfg.current()), tx));
+        ui.waiting.take(crate::gui::Pending::new(a_waiting_request(ui.cfg.current()), tx));
         assert!(enroll_facts(&ui, &card).waiting, "факт заявки обязан дойти до слова и до кнопки");
         for dirty in [Dirty::No, Dirty::Fields, Dirty::NameOnly] {
             let b = main_button(&ui, "", dirty);
@@ -6990,7 +6990,7 @@ mod tests {
         // та же мина, что заглушка `UNWIRED` в меню.
         // Ключ заявки — НАШ (`Request::card`), и подменять надо именно его: `base.base_id` с расколом ключа стал проводным видом и
         // заявку больше не ключует.
-        ui.waiting[0].request.card = "Другая".into();
+        ui.waiting.lock()[0].request.card = "Другая".into();
         assert_ne!(main_button(&ui, "", Dirty::No).label, crate::gui::ALLOW);
     }
     /// Заявка носит КЛЮЧ той карточки, по которой её и ищут (`enroll_facts`, `request_to_answer`): имя в заявке — только для слов
@@ -7020,7 +7020,7 @@ mod tests {
         let mut ui = ui_for("accept", "tunnel", false);
         let card = ui.cfg.current().name.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
-        ui.waiting.push(crate::gui::Pending::new(a_waiting_request(ui.cfg.current()), tx));
+        ui.waiting.take(crate::gui::Pending::new(a_waiting_request(ui.cfg.current()), tx));
         assert!(enroll_facts(&ui, &card).waiting, "живая заявка ждёт — иначе тест проверяет не то");
         assert_eq!(main_button(&ui, "", Dirty::No).label, crate::gui::ALLOW);
 
@@ -7032,7 +7032,7 @@ mod tests {
         // Тик роняет её со словами: исчезнувшую первую строку человек иначе
         // не объяснит.
         crate::gui::prune_enrollment(&mut ui, std::time::SystemTime::now());
-        assert!(ui.waiting.is_empty());
+        assert!(ui.waiting.lock().is_empty());
         assert!(ui.log.last().unwrap().line.text.contains("отменилась"), "{:?}", ui.log.last());
     }
 
@@ -7047,15 +7047,15 @@ mod tests {
     /// сам выбор заявки под диалог — нет.
     #[test]
     fn allow_passes_over_a_request_whose_talk_has_died() {
-        let mut ui = ui_for("accept", "tunnel", false);
+        let ui = ui_for("accept", "tunnel", false);
         let card = ui.cfg.current().name.clone();
         // Первая в очереди — сторона 4, вторая — сторона 3 (`a_waiting_request`).
         let (first_tx, first_rx) = tokio::sync::oneshot::channel();
         let mut first = a_waiting_request(ui.cfg.current());
         first.peer = a_key(4);
-        ui.waiting.push(crate::gui::Pending::new(first, first_tx));
+        ui.waiting.take(crate::gui::Pending::new(first, first_tx));
         let (second_tx, _second_rx) = tokio::sync::oneshot::channel();
-        ui.waiting.push(crate::gui::Pending::new(a_waiting_request(ui.cfg.current()), second_tx));
+        ui.waiting.take(crate::gui::Pending::new(a_waiting_request(ui.cfg.current()), second_tx));
         assert_eq!(request_to_answer(&ui, &card).map(|r| r.peer), Some(a_key(4)), "обе живы — спрашивают про первую");
 
         // Разговор первой кончился: приёмник её решения уронен.

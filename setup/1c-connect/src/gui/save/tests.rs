@@ -2752,10 +2752,11 @@ fn closing_the_dialog_without_an_answer_leaves_the_request_hanging() {
     use crate::enroll::Decision;
     let mut ui = Ui::for_test();
     let card = a_request().card().clone();
-    ui.waiting.push(gone_pending(a_request()));
+    ui.waiting.take(gone_pending(a_request()));
 
     answer_request(&mut ui, &card, "Ромашка", a_request().peer, Decision::NoAnswer);
-    assert_eq!(ui.waiting.len(), 1, "закрытие без ответа заявку не снимает");
+    assert_eq!(ui.waiting.lock().len(), 1, "закрытие без ответа заявку не снимает");
+    assert!(!ui.waiting.lock()[0].answered(), "и ответом не считается");
     assert!(ui.declined.is_empty(), "и отказом не притворяется");
     // Стережётся СМЫСЛ, а не буква: человеку сказано, что просьба не пропала
     // и ответить ещё можно. Прежде тест держал дословное «ждёт ответа» — и
@@ -2766,14 +2767,18 @@ fn closing_the_dialog_without_an_answer_leaves_the_request_hanging() {
     assert!(said.contains("никуда не делась") && said.contains("ответить"), "сказано, что просьба жива: {said}");
 
     answer_request(&mut ui, &card, "Ромашка", a_request().peer, Decision::Deny);
-    assert!(ui.waiting.is_empty(), "отказ заявку снимает");
+    // «Ответили» вместо «сняли со списка»: со списка заявку снимает уборка
+    // (`enroll::Requests` — там довод, зачем отвеченная лежит до неё), а с
+    // экрана она пропадает в ту же секунду — ждать её больше нечего.
+    assert!(ui.waiting.lock()[0].answered(), "отказ — это ответ: ждать эту заявку больше нечего");
+    assert!(!ui.waiting.lock()[0].reachable(), "и на экране её больше нет");
     assert_eq!(ui.declined, vec![card.clone()], "а исход остаётся: слово «отклонено» на строке");
 
     // Разрешение по новой заявке стирает прошлый исход: карточка больше не
     // «отклонено».
-    ui.waiting.push(gone_pending(a_request()));
+    ui.waiting.take(gone_pending(a_request()));
     answer_request(&mut ui, &card, "Ромашка", a_request().peer, Decision::Allow);
-    assert!(ui.waiting.is_empty());
+    assert!(ui.waiting.lock()[0].answered(), "разрешение — тоже ответ");
     assert!(ui.declined.is_empty(), "разрешённая карточка не носит прошлый отказ");
 }
 
@@ -2785,13 +2790,13 @@ fn the_answer_travels_back_to_the_conversation() {
     use crate::enroll::Decision;
     let mut ui = Ui::for_test();
     let (tx, mut rx) = tokio::sync::oneshot::channel();
-    ui.waiting.push(crate::gui::Pending::new(a_request(), tx));
+    ui.waiting.take(crate::gui::Pending::new(a_request(), tx));
     answer_request(&mut ui, a_request().card(), "Ромашка", a_request().peer, Decision::Allow);
     assert_eq!(rx.try_recv().unwrap(), Decision::Allow);
 
     // Ответить некуда — молчать нельзя: человек нажал «Разрешить» и иначе
     // ждал бы подключения, которого не будет.
-    ui.waiting.push(gone_pending(a_request()));
+    ui.waiting.take(gone_pending(a_request()));
     answer_request(&mut ui, a_request().card(), "Ромашка", a_request().peer, Decision::Allow);
     assert!(ui.log.last().unwrap().line.text.contains("не удалось"), "{:?}", ui.log.last());
 }
@@ -2805,11 +2810,11 @@ fn a_repeat_from_the_same_key_replaces_its_own_request_and_the_refusal() {
     let mut ui = Ui::for_test();
     ui.declined.push(a_request().card().clone());
     take_request(&mut ui, gone_pending(a_request()));
-    assert_eq!(ui.waiting.len(), 1);
+    assert_eq!(ui.waiting.lock().len(), 1);
     assert!(ui.declined.is_empty(), "новая заявка перебивает прошлый исход");
 
     take_request(&mut ui, gone_pending(a_request()));
-    assert_eq!(ui.waiting.len(), 1, "тот же ключ — та же заявка, а не вторая запись о ней");
+    assert_eq!(ui.waiting.lock().len(), 1, "тот же ключ — та же заявка, а не вторая запись о ней");
 
     // Заявка по другой карточке соседку не трогает: отзыв и разрешение
     // адресуются карточкой, и путать их нельзя.
@@ -2821,7 +2826,7 @@ fn a_repeat_from_the_same_key_replaces_its_own_request_and_the_refusal() {
         ..a_request()
     };
     take_request(&mut ui, gone_pending(other));
-    assert_eq!(ui.waiting.len(), 2);
+    assert_eq!(ui.waiting.lock().len(), 2);
 }
 
 /// HIGH 1 проверки безопасности, дословно: «ответ человека применяется не к
@@ -2850,7 +2855,7 @@ fn the_answer_goes_to_the_request_the_person_was_shown_and_to_no_other() {
     let shown = a.peer;
     // Пока человек сверяет отпечаток по телефону, встаёт в очередь Б.
     take_request(&mut ui, crate::gui::Pending::new(b.clone(), b_tx));
-    assert_eq!(ui.waiting.len(), 2, "чужая заявка показанную не вытесняет");
+    assert_eq!(ui.waiting.lock().len(), 2, "чужая заявка показанную не вытесняет");
 
     answer_request(&mut ui, a.card(), &a.card_name, shown, Decision::Allow);
     assert_eq!(a_rx.try_recv().unwrap(), Decision::Allow, "разрешение обязано уйти той стороне, чей отпечаток сверяли");
@@ -2861,9 +2866,12 @@ fn the_answer_goes_to_the_request_the_person_was_shown_and_to_no_other() {
         matches!(b_rx.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)),
         "сторона, которую человек не видел, разрешения не получает"
     );
-    // Б осталась ждать своей очереди — её человек увидит своим диалогом.
-    assert_eq!(ui.waiting.len(), 1);
-    assert_eq!(ui.waiting[0].request.peer, b.peer);
+    // Б осталась ждать своей очереди — её человек увидит своим диалогом. Считаются ЖДУЩИЕ, а не все записи списка: отвеченная А
+    // лежит там до уборки нарочно (`enroll::Requests`), но ждать её больше нечего и на экране её нет.
+    let held = ui.waiting.lock();
+    let still: Vec<&crate::gui::Pending> = held.iter().filter(|p| p.reachable()).collect();
+    assert_eq!(still.len(), 1);
+    assert_eq!(still[0].request.peer, b.peer);
 }
 
 /// Та же защита с другого конца: показанной заявки уже нет (разговор
@@ -2881,7 +2889,8 @@ fn an_answer_to_a_gone_request_touches_no_one_else() {
     answer_request(&mut ui, b.card(), &b.card_name, gone, Decision::Deny);
     // Канал жив, но пуст — тем же приёмом, что выше: `Empty`, а не `Ok(None)`.
     assert!(matches!(b_rx.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)), "отказ чужой заявке не адресуется");
-    assert_eq!(ui.waiting.len(), 1, "чужая заявка со списка не снимается");
+    assert_eq!(ui.waiting.lock().len(), 1, "чужая заявка со списка не снимается");
+    assert!(ui.waiting.lock()[0].reachable(), "и ждать её не перестала");
     assert!(ui.declined.is_empty(), "исхода, которого человек не выбирал про ЭТУ сторону, карточка не носит");
     // Смысл, а не буква: человеку сказано, что ТОЙ просьбы уже нет и что
     // делать дальше. Прежняя формулировка объясняла ему наше устройство
@@ -2915,7 +2924,7 @@ fn the_book_is_reread_after_the_person_allows() {
     assert_eq!(ui.book.as_ref().unwrap().of(&card).len(), 0, "снимок окна о чужой записи сам не узнаёт — это и была находка");
 
     let (tx, mut rx) = tokio::sync::oneshot::channel();
-    ui.waiting.push(crate::gui::Pending::new(a_request(), tx));
+    ui.waiting.take(crate::gui::Pending::new(a_request(), tx));
     answer_request(&mut ui, &card, "Ромашка", peer, Decision::Allow);
     assert_eq!(rx.try_recv().unwrap(), Decision::Allow, "решение обязано уехать — иначе перечтения и не будет");
 
@@ -2952,7 +2961,7 @@ fn allowing_drops_the_code_it_spent() {
     let ticket = crate::ticket::Ticket::issue(a_request().peer, None, Vec::new()).unwrap();
     ui.codes.lock().push((card.clone(), ticket));
     let (tx, _rx) = tokio::sync::oneshot::channel();
-    ui.waiting.push(crate::gui::Pending::new(a_request(), tx));
+    ui.waiting.take(crate::gui::Pending::new(a_request(), tx));
 
     answer_request(&mut ui, &card, "Ромашка", a_request().peer, Decision::Allow);
     assert!(ui.codes.lock().is_empty(), "погашенный зачислением код в карточке не остаётся");
@@ -2976,7 +2985,7 @@ fn an_allowance_that_never_arrived_keeps_the_code_it_did_not_spend() {
     ui.codes.lock().push((card.clone(), ticket));
     // Разговор кончился: отвечать некуда — ровно то, о чём окно и говорит
     // словами «там уже не ждут ответа».
-    ui.waiting.push(gone_pending(a_request()));
+    ui.waiting.take(gone_pending(a_request()));
 
     answer_request(&mut ui, &card, "Ромашка", a_request().peer, Decision::Allow);
 

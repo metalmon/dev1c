@@ -17,7 +17,7 @@ use one_c_connect::gate;
 #[cfg(feature = "gui")]
 use one_c_connect::gui::Start;
 use one_c_connect::ops_host::{self, Ctx, McpServer};
-use one_c_connect::{allow, cfg, door, flow, journal, licence, peer, peer_out, project, session, single_instance, verify};
+use one_c_connect::{allow, cfg, door, enroll, flow, journal, licence, peer, peer_out, project, session, single_instance, verify};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -98,6 +98,18 @@ enum Cmd {
         code: String,
         /// Имя соединения, которым звонить; без имени — текущее.
         card: Option<String>,
+    },
+    /// Показать, кто просит разрешения подключиться.
+    Requests,
+    /// Разрешить подключение по заявке — отпечаток берётся из `requests`.
+    Allow {
+        /// Отпечаток той стороны, как он напечатан в списке заявок.
+        fingerprint: String,
+    },
+    /// Отклонить подключение по заявке — отпечаток берётся из `requests`.
+    Decline {
+        /// Отпечаток той стороны, как он напечатан в списке заявок.
+        fingerprint: String,
     },
     /// Переключить текущее соединение; без имени — список, текущее отмечено.
     Use {
@@ -237,8 +249,22 @@ fn run() -> Result<()> {
     // `code` и `dial` — тоже сюда, и не поблажкой: пароля они не используют вовсе (вся их работа — стук в управляющую дверь), а
     // отказать им на чужом шифртексте значило бы, что человек не может ни выдать код, ни позвонить ровно тогда, когда настройки
     // переехали с другой машины, — то есть в первый же день работы по ним.
-    let read_only =
-        matches!(cmd, Cmd::Status | Cmd::Check | Cmd::Verify | Cmd::Checksums | Cmd::Use { .. } | Cmd::Code { .. } | Cmd::Dial { .. });
+    // `requests`, `allow` и `decline` — туда же и по тому же доводу, что `code` и `dial`: вся их работа — стук в управляющую дверь,
+    // пароля они не используют вовсе, а отказать им на чужом шифртексте значило бы, что человек не может ответить на заявку ровно
+    // тогда, когда настройки переехали с другой машины.
+    let read_only = matches!(
+        cmd,
+        Cmd::Status
+            | Cmd::Check
+            | Cmd::Verify
+            | Cmd::Checksums
+            | Cmd::Use { .. }
+            | Cmd::Code { .. }
+            | Cmd::Dial { .. }
+            | Cmd::Requests
+            | Cmd::Allow { .. }
+            | Cmd::Decline { .. }
+    );
     let cfg = if read_only { cfg::Cfg::load_unchecked(&kit)? } else { cfg::Cfg::load(&kit)? };
     let ctx = make_ctx(kit, cfg, cli.dry_run, cli.yes);
     let ops = ops_host::host();
@@ -366,6 +392,9 @@ fn run() -> Result<()> {
         Cmd::Use { name } => use_connection(&ctx, name.as_deref())?,
         Cmd::Code { card } => issue_code(card)?,
         Cmd::Dial { code, card } => dial(&ctx, code, card)?,
+        Cmd::Requests => show_requests()?,
+        Cmd::Allow { fingerprint } => answer_request(&fingerprint, enroll::Decision::Allow)?,
+        Cmd::Decline { fingerprint } => answer_request(&fingerprint, enroll::Decision::Deny)?,
     }
     Ok(())
 }
@@ -400,6 +429,34 @@ fn dial(ctx: &Ctx, code: String, card: Option<String>) -> Result<()> {
     let door::Answer::Dialled(out) = answer else { anyhow::bail!("{}", door::WRONG_ANSWER) };
     let text = door::dialled_words(&name, &out.map_err(|e| anyhow::anyhow!("{e}"))?).map_err(|e| anyhow::anyhow!("{e}"))?;
     println!("{text}");
+    Ok(())
+}
+
+/// Подкоманда `requests`: тот же клиент двери, что `code` и `dial`, и ничего не поднимает. Заявки живут в памяти ЖИВОГО экземпляра —
+/// на диске их нет и быть не может, — поэтому без него это «сделать не удалось», а не пустой список: пустота тут читалась бы как
+/// «никто не просит», и человек на живом прогоне спокойно ждал бы звонка, на который уже некому ответить.
+///
+/// Слова списка — в `door::request_lines` и только там: там же их проверяет тест.
+fn show_requests() -> Result<()> {
+    let answer = door::ask(door::Ask::Requests).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let door::Answer::Requests(list) = answer else { anyhow::bail!("{}", door::WRONG_ANSWER) };
+    for line in door::request_lines(&list.map_err(|e| anyhow::anyhow!("{e}"))?) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// Подкоманды `allow` и `decline`: решение ЧЕЛОВЕКА уезжает в тот разговор, который его ждёт.
+///
+/// Двух подкоманд, а не одной с ключом, нарочно: автоматического разрешения в продукте нет (закон 6 спеки), и набрать «разрешить всё»
+/// здесь нечем — каждый ответ называет свою заявку отпечатком, тем самым, что человек сверил голосом.
+///
+/// Слова исхода — у окна (`enroll::answered` через `door::answer_for`), второго словаря здесь нет. Не отдали ответ — это «не
+/// сделано»: причина названа, код возврата не ноль.
+fn answer_request(fingerprint: &str, d: enroll::Decision) -> Result<()> {
+    let answer = door::ask(door::Ask::Answer { fingerprint: fingerprint.to_string(), decision: d }).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let door::Answer::Done(said) = answer else { anyhow::bail!("{}", door::WRONG_ANSWER) };
+    println!("{}", said.map_err(|e| anyhow::anyhow!("{e}"))?);
     Ok(())
 }
 
@@ -482,9 +539,15 @@ impl Drop for OffOnExit<'_> {
 /// и замыкание с узлом внутри умирает — а узел нужен как раз в этом сочетании, чтобы принимать вызовы ТОЙ стороны.
 ///
 /// События узла идут человеку в консоль (`ctx.sink`, тот же вид строк, что у остальных подкоманд) и на диск (`journal::say`, тот же
-/// файл и тот же вид, что у окна). Заявка на зачисление (`Out::Enroll`) и состояние потока карточки (`Out::Flow`) здесь молчат:
-/// заявке нужен ответ человека, а показать её и спросить этой подкомандe нечем — слово о них за командной строкой сопряжения.
-fn peer_wiring(ctx: &Ctx) -> (peer::Peer, session::Wiring) {
+/// файл и тот же вид, что у окна). Состояние потока карточки (`Out::Flow`) здесь молчит: показывать его некому, экрана у этой сборки
+/// нет.
+///
+/// `requests` — куда класть заявки на зачисление (`Out::Enroll`). `Some` — их спросят набранным `1c-connect requests` и ответят на
+/// них `allow`/`decline` (задача 7 плана): так и идёт живой прогон пары B на машине без окна. `None` — спрашивать о них некому, и
+/// заявка роняется тут же: уронённый канал значит для разговора третий ответ («человек не решил»), и зовущая сторона слышит это
+/// сразу, а не отсидев пять минут чужого срока на решение. Так и работает `connect` — дверь он открывает, но делать ею ничего не
+/// умеет (`Door::answers` он не зовёт), и копить заявки, которых никто не спросит, значило бы заставлять ту сторону ждать впустую.
+fn peer_wiring(ctx: &Ctx, requests: Option<enroll::Requests>) -> (peer::Peer, session::Wiring) {
     let serving = session::Serving::default();
     let (out_tx, mut out_rx) = futures::channel::mpsc::unbounded::<peer_out::Out>();
     let node = peer::start(&ctx.kit, out_tx, serving.clone());
@@ -493,9 +556,19 @@ fn peer_wiring(ctx: &Ctx) -> (peer::Peer, session::Wiring) {
         futures::executor::block_on(async move {
             use futures::StreamExt;
             while let Some(out) = out_rx.next().await {
-                if let peer_out::Out::Say(e) = out {
-                    journal::say(&kit, &e);
-                    sink(e);
+                match out {
+                    peer_out::Out::Say(e) => {
+                        journal::say(&kit, &e);
+                        sink(e);
+                    }
+                    // Заявка кладётся в общий список — тот самый, который спрашивает управляющая дверь. Правило приёма (вытеснение
+                    // повтора, очередь чужой стороны) живёт в `Requests::take`, одно на окно и на эту подкоманду.
+                    peer_out::Out::Enroll(p) => {
+                        if let Some(requests) = &requests {
+                            requests.take(p);
+                        }
+                    }
+                    peer_out::Out::Flow(..) => {}
                 }
             }
         })
@@ -537,7 +610,7 @@ fn connect(ctx: &Ctx) -> Result<()> {
     let ports = ctx.cfg.ports();
     println!("Соединение «{}»; порты {} (mcp-1c) и {} (веб-клиент). Ctrl+C — отключиться.", ctx.cfg.current().name, ports.mcp, ports.web);
     // Узел держится до конца функции, а не до конца проводки — см. докстроку `peer_wiring`.
-    let (_node, wiring) = peer_wiring(ctx);
+    let (_node, wiring) = peer_wiring(ctx, None);
     let mut s =
         session::start_with_enabled(ctx.cfg.clone(), ctx.kit.clone(), ctx.sink.clone(), Arc::new(AtomicBool::new(true)), wiring, |_| {});
     let rt = tokio::runtime::Runtime::new()?;
@@ -655,10 +728,11 @@ fn serve(ctx: &Ctx) -> Result<()> {
         ctx.fail(text);
     }
     // Узел держится до конца функции, а не до конца проводки — см. докстроку `peer_wiring`.
-    let (_node, wiring) = peer_wiring(ctx);
+    let requests = enroll::Requests::default();
+    let (_node, wiring) = peer_wiring(ctx, Some(requests.clone()));
     // Дверь учится ДЕЛАТЬ, а не только рассказывать: `code` и `dial` с этой машины идут к ЭТОМУ узлу (задача 6 плана). Решает за неё
     // бек целиком (`door::serves`) — тот же самый, что ставит себе окно, потому что клиенты у двери одни.
-    door.answers(door::serves(ctx.kit.clone(), _node.clone(), one_c_connect::codes::Codes::default()));
+    door.answers(door::serves(ctx.kit.clone(), _node.clone(), one_c_connect::codes::Codes::default(), requests));
     // Состояние сеанса здесь прежде никому не отдавали (`|_| {}`), и отдавать было некому: экрана у этой сборки нет. Теперь его спрашивают дверью, и снимок обновляется на каждую перемену — так `status` с другой машины видит связь, а не последнее, что успел напечатать терминал.
     let on_state = {
         let (door, card) = (door.clone(), card.clone());
@@ -746,6 +820,20 @@ mod tests {
         let cli = Cli::try_parse_from(["1c-connect", "dial", "кодик", "Ромашка"]).expect("dial с кодом и именем разбирается");
         assert!(matches!(cli.cmd, Some(Cmd::Dial { code, card: Some(n) }) if code == "кодик" && n == "Ромашка"));
         assert!(Cli::try_parse_from(["1c-connect", "dial"]).is_err(), "без кода звонить некуда — отказ, а не пустая строка в узел");
+    }
+
+    /// `requests` аргументов не берёт вовсе, а `allow`/`decline` требуют отпечаток: ответить «всем сразу» здесь нечем, и это не
+    /// придирка разбора — автоматического разрешения в продукте нет (закон 6 спеки), каждый ответ называет свою заявку.
+    #[test]
+    fn requests_takes_nothing_and_an_answer_always_names_its_request() {
+        let cli = Cli::try_parse_from(["1c-connect", "requests"]).expect("requests разбирается");
+        assert!(matches!(cli.cmd, Some(Cmd::Requests)));
+        let cli = Cli::try_parse_from(["1c-connect", "allow", "…8d61"]).expect("allow с отпечатком разбирается");
+        assert!(matches!(cli.cmd, Some(Cmd::Allow { fingerprint }) if fingerprint == "…8d61"));
+        let cli = Cli::try_parse_from(["1c-connect", "decline", "…8d61"]).expect("decline с отпечатком разбирается");
+        assert!(matches!(cli.cmd, Some(Cmd::Decline { fingerprint }) if fingerprint == "…8d61"));
+        assert!(Cli::try_parse_from(["1c-connect", "allow"]).is_err(), "без отпечатка разрешать нечего — отказ, а не «все сразу»");
+        assert!(Cli::try_parse_from(["1c-connect", "decline"]).is_err(), "и отклонять тоже");
     }
 
     /// Ровно два сервера — те самые имена, что увидит `settings.json` Zed и

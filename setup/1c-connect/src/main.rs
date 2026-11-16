@@ -115,6 +115,18 @@ enum Cmd {
         /// Имя соединения, если одна сторона просит разрешения сразу по нескольким; без имени заявка ищется по одному отпечатку.
         card: Option<String>,
     },
+    /// Показать, кому разрешено подключаться; без имени — по всем соединениям.
+    Peers {
+        /// Имя соединения, как оно записано в настройках; без имени — все.
+        card: Option<String>,
+    },
+    /// Забрать у одной стороны разрешение подключаться; готовую строку печатает `peers`.
+    Revoke {
+        /// Отпечаток той стороны целиком — его печатает `peers` строкой «отозвать».
+        fingerprint: String,
+        /// Имя соединения: разрешение принадлежит паре «соединение + сторона», и без имени отозвалось бы не то.
+        card: String,
+    },
     /// Переключить текущее соединение; без имени — список, текущее отмечено.
     Use {
         /// Имя соединения, как оно записано в настройках.
@@ -258,6 +270,8 @@ fn run() -> Result<()> {
     // `requests`, `allow` и `decline` — туда же и по тому же доводу, что `code` и `dial`: вся их работа — стук в управляющую дверь,
     // пароля они не используют вовсе, а отказать им на чужом шифртексте значило бы, что человек не может ответить на заявку ровно
     // тогда, когда настройки переехали с другой машины.
+    // `peers` и `revoke` — последние по тому же доводу, и для `revoke` он весомее прочих: отказать в ОТЗЫВЕ разрешения из-за
+    // непрочитанного пароля значило бы оставить доступ у того, у кого человек его прямо сейчас забирает.
     let read_only = matches!(
         cmd,
         Cmd::Status
@@ -270,6 +284,8 @@ fn run() -> Result<()> {
             | Cmd::Requests
             | Cmd::Allow { .. }
             | Cmd::Decline { .. }
+            | Cmd::Peers { .. }
+            | Cmd::Revoke { .. }
     );
     let cfg = if read_only { cfg::Cfg::load_unchecked(&kit)? } else { cfg::Cfg::load(&kit)? };
     let ctx = make_ctx(kit, cfg, cli.dry_run, cli.yes);
@@ -401,6 +417,8 @@ fn run() -> Result<()> {
         Cmd::Requests => show_requests()?,
         Cmd::Allow { fingerprint, card } => answer_request(&fingerprint, card, door::Said::Allow)?,
         Cmd::Decline { fingerprint, card } => answer_request(&fingerprint, card, door::Said::Deny)?,
+        Cmd::Peers { card } => show_peers(card)?,
+        Cmd::Revoke { fingerprint, card } => revoke_peer(card, fingerprint)?,
     }
     Ok(())
 }
@@ -463,6 +481,34 @@ fn show_requests() -> Result<()> {
 fn answer_request(fingerprint: &str, card: Option<String>, said: door::Said) -> Result<()> {
     let asked = door::Ask::Answer { fingerprint: fingerprint.to_string(), card, said };
     let answer = door::ask(asked).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let door::Answer::Done(said) = answer else { anyhow::bail!("{}", door::WRONG_ANSWER) };
+    println!("{}", said.map_err(|e| anyhow::anyhow!("{e}"))?);
+    Ok(())
+}
+
+/// Подкоманда `peers`: тот же клиент двери, что `requests`, и ничего не поднимает. Книга допуска лежит на диске, но спрашивается
+/// у живого — рядом стоит `revoke`, которому без живого не обойтись (отзыв рвёт поток той стороны), а список и отзыв человек читает и
+/// набирает подряд: дай им разные источники, и скопированная строка однажды будет не о том, что сейчас в книге.
+///
+/// Слова списка — в `door::peer_lines` и только там: там же их проверяет тест. Имя карточки едет туда же, чтобы пустой ответ знал, о
+/// чём спрашивали.
+fn show_peers(card: Option<String>) -> Result<()> {
+    let asked = card.clone();
+    let answer = door::ask(door::Ask::Peers { card }).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let door::Answer::Peers(list) = answer else { anyhow::bail!("{}", door::WRONG_ANSWER) };
+    for line in door::peer_lines(&list.map_err(|e| anyhow::anyhow!("{e}"))?, asked.as_deref()) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// Подкоманда `revoke`: забрать у одной стороны разрешение — то же дело, что кнопка «Отозвать разрешение» в карточке, и те же слова
+/// (`enrolled::revoked_words` через `door::revoke_for`).
+///
+/// Адрес — ПАРА: отпечаток и имя карточки, обе половины обязательны (`door::Ask::Revoke`, там довод целиком). Не отозвали — это «не
+/// сделано»: причина названа, код возврата не ноль, тем же правилом, что у `allow`.
+fn revoke_peer(card: String, fingerprint: String) -> Result<()> {
+    let answer = door::ask(door::Ask::Revoke { card, fingerprint }).map_err(|e| anyhow::anyhow!("{e}"))?;
     let door::Answer::Done(said) = answer else { anyhow::bail!("{}", door::WRONG_ANSWER) };
     println!("{}", said.map_err(|e| anyhow::anyhow!("{e}"))?);
     Ok(())
@@ -876,6 +922,24 @@ mod tests {
         assert!(matches!(cli.cmd, Some(Cmd::Decline { card: Some(c), .. }) if c == "Ромашка"));
         assert!(Cli::try_parse_from(["1c-connect", "allow"]).is_err(), "без отпечатка разрешать нечего — отказ, а не «все сразу»");
         assert!(Cli::try_parse_from(["1c-connect", "decline"]).is_err(), "и отклонять тоже");
+    }
+
+    /// `peers` имя карточки не требует (без него — все соединения: человек приходит посмотреть, кому он что дал, а не кому дал по
+    /// текущей карточке), а `revoke` требует ОБЕ половины адреса. Отпечаток первым — тем же порядком, что у `allow`: строка, которую
+    /// человек копирует из списка, у обеих команд читается одинаково.
+    #[test]
+    fn peers_takes_an_optional_card_and_revoke_needs_both_halves_of_the_address() {
+        let cli = Cli::try_parse_from(["1c-connect", "peers"]).expect("peers без имени разбирается");
+        assert!(matches!(cli.cmd, Some(Cmd::Peers { card: None })));
+        let cli = Cli::try_parse_from(["1c-connect", "peers", "Ромашка"]).expect("peers с именем разбирается");
+        assert!(matches!(cli.cmd, Some(Cmd::Peers { card: Some(c) }) if c == "Ромашка"));
+        let cli = Cli::try_parse_from(["1c-connect", "revoke", "…8d61", "Ромашка"]).expect("revoke с обеими половинами разбирается");
+        assert!(matches!(cli.cmd, Some(Cmd::Revoke { fingerprint, card }) if fingerprint == "…8d61" && card == "Ромашка"));
+        assert!(
+            Cli::try_parse_from(["1c-connect", "revoke", "…8d61"]).is_err(),
+            "без имени карточки отозвалось бы не то: разрешение принадлежит паре"
+        );
+        assert!(Cli::try_parse_from(["1c-connect", "revoke"]).is_err(), "и без отпечатка отзывать нечего");
     }
 
     /// Ровно два сервера — те самые имена, что увидит `settings.json` Zed и

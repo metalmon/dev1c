@@ -905,3 +905,33 @@ fn a_local_card_keeps_its_own_two_words_whatever_the_book_says() {
     assert_eq!(super::row(&crate::cfg::Cfg::default(), &c, false, None, &noisy).state, "выключено");
     assert_eq!(super::row(&crate::cfg::Cfg::default(), &c, false, Some(&State::Up { since: Instant::now() }), &noisy).state, "включено");
 }
+
+/// **Окно рассказывает управляющей двери о связи КАЖДОЙ карточки, и теми же словами, что строка списка** (задача 9: прежде оно клало
+/// `cards: None` — «о связи пока не сообщаю», потому что класть было нечего).
+///
+/// Три карточки и три разных случая в одном снимке: текущая держит транспорт и получает его слово; соседняя туннельная о связи
+/// молчит (своего потока у неё нет, транспорт — не её), и строки у неё нет вовсе; локальная не о связи вообще — у неё своя пара слов
+/// на экране («включено»/«выключено»), и пусти её в снимок, `status` назвал бы это «подключено».
+///
+/// Слово сверяется с общим словарём, а не с литералом: сверка с «подключено» буквой пережила бы подмену словаря, ради единственности
+/// которого он в бек и переезжал.
+#[test]
+fn the_window_tells_the_door_the_state_of_every_card() {
+    let mut ui = Ui::for_test();
+    ui.cfg = cfg_with(&["Ромашка", "Клевер", "Своя"]);
+    for c in &mut ui.cfg.connections {
+        c.mode = "tunnel".into();
+    }
+    ui.cfg.connections[2].mode = "local".into();
+    ui.link = State::Up { since: Instant::now() };
+
+    let v = door_view(&ui);
+    let cards = v.cards.expect("окно о связи СООБЩАЕТ, а не молчит");
+    assert_eq!(cards.len(), 1, "строку получает только та карточка, которой есть что сказать о связи: {cards:?}");
+    assert_eq!(cards[0].name, "Ромашка", "транспорт принадлежит текущей карточке и только ей");
+    assert_eq!(cards[0].word, contract_word(Contract::Up).unwrap(), "слово — из общего словаря, а не своё");
+
+    // Связи нет ни у кого — и это СКАЗАНО пустым списком, а не умолчано `None`: разница названа типом (`door::StatusView::cards`).
+    ui.link = State::Off;
+    assert_eq!(door_view(&ui).cards, Some(vec![]), "связей нет — это ответ, а не незнание");
+}

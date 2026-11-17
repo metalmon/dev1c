@@ -284,6 +284,67 @@ pub fn session_of_pid(_pid: u32) -> Option<u32> {
     None
 }
 
+/// Есть ли на этой машине место, где показать окно, — факт ОС, сосед
+/// `current_owner` и `session_of_pid` по вопросу «что это за машина и что это
+/// за сеанс». Не принадлежность окна и потому не в `gui/`: закон 8 спеки —
+/// `Ui` она не берёт, `cx` не берёт, ничего про вид не несёт, а сборка без
+/// окна (`--no-default-features`) этот вопрос задаёт тем же именем.
+///
+/// Зачем. Отказ при старте бек доносит до человека ОДНИМ из двух способов —
+/// блокирующим сообщением ОС (`gui::fatal` → `MessageBoxW`) или словами в
+/// журнал и `stderr` (`journal::no_place_for_a_window`), — и до 17.11 выбор
+/// между ними делало место отказа в стеке, а не наличие рабочего стола. На
+/// невидимой оконной станции `MessageBoxW` ждёт «ОК» от того, кого там нет:
+/// запуск по ssh писал 0 байт, не выходил и держал единственный на комплект
+/// замок (замер живого прогона 17.11; тот же отказ сжёг владельцу день 15.11).
+/// Поэтому вопрос задаётся машиной и ДО всякого блокирующего вызова.
+///
+/// **Поведение одинаково на всех осях — разнится только примитив**, и `cfg`
+/// ниже читать как «на линуксе иначе» нельзя: и там, и там это один вопрос
+/// «куда показывать окно» и один ответ на него. На Windows отвечает оконная
+/// станция процесса (флаг `WSF_VISIBLE`); на Linux — `DISPLAY`/
+/// `WAYLAND_DISPLAY`, которых у входа по ssh без проброса X нет.
+///
+/// Проба на Windows — та же, которой пользуется сам GPUI
+/// (`platform::is_window_station_visible`, «A service's, or an SSH login's,
+/// doesn't»). Она там приватная, поэтому копия своя; первоисточник назван,
+/// чтобы следующий не искал и второй меры не заводил.
+#[cfg(windows)]
+pub fn place_for_a_window() -> bool {
+    use windows_sys::Win32::System::StationsAndDesktops::{GetProcessWindowStation, GetUserObjectInformationW, UOI_FLAGS, USEROBJECTFLAGS};
+    use windows_sys::Win32::UI::WindowsAndMessaging::WSF_VISIBLE;
+    // SAFETY: обычный вызов user32 без аргументов; возврат проверяем на null.
+    let station = unsafe { GetProcessWindowStation() };
+    if station.is_null() {
+        // Станции у процесса нет вовсе — окну тем более негде.
+        return false;
+    }
+    let mut flags = USEROBJECTFLAGS::default();
+    // SAFETY: `flags` — наш стек, и длину передаём его же; `station` не null.
+    // Последний аргумент (сколько байт понадобилось) не нужен: размер мы знаем.
+    let told = unsafe {
+        GetUserObjectInformationW(
+            station,
+            UOI_FLAGS,
+            (&raw mut flags).cast(),
+            std::mem::size_of::<USEROBJECTFLAGS>() as u32,
+            std::ptr::null_mut(),
+        )
+    };
+    // Не ответила — считаем, что места нет: молчание ОС не повод лезть в блокирующее сообщение.
+    told != 0 && flags.dwFlags & WSF_VISIBLE as u32 != 0
+}
+
+/// На Linux тот же вопрос спрашивается у окружения: графический сеанс
+/// называет себя через `DISPLAY` (X11) либо `WAYLAND_DISPLAY`. У входа по ssh
+/// без проброса их нет — и ответ тот же, что на Windows у невидимой оконной
+/// станции. Пустое значение считаем отсутствием: `DISPLAY=` ни на какой экран
+/// не указывает.
+#[cfg(not(windows))]
+pub fn place_for_a_window() -> bool {
+    ["DISPLAY", "WAYLAND_DISPLAY"].iter().any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()))
+}
+
 /// Один ли это владелец — чистое правило, без похода в систему (та же пара
 /// «правило отдельно от добычи», что у `same_image`). SID на Windows
 /// канонически в верхнем регистре, но сравнение не полагается на это;

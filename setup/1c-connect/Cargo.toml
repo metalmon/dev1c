@@ -78,6 +78,21 @@ unicode-properties = { version = "0.1", features = ["general-category"] }
 # стандартные потоки в тот же `Serve::dispatch`, что принимает TCP и канал
 # туннеля (`ops_host::run_mcp`).
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "io-util", "io-std", "time", "sync", "signal"] }
+# Дел у крейта два, и только первое про Windows.
+#
+# Список процессов платформы (`bridge::configurator_count`, `orphan::parent_pid`) без подпроцесса:
+# полный `tasklist` стоил 330–510 мс (замер ревью), а спрашивается это на
+# каждом такте. Оба зова под `cfg(windows)` — на Linux то же считает
+# `bridge::linux_platform_count` по `/proc`.
+#
+# Имя этой машины (`peer::says_name` — чем сторона называет себя той стороне):
+# код общий для всех осей, и `System::host_name()` есть на обеих. Поэтому
+# объявление здесь, а не в windows-разделе: до 17.11 оно стояло там, и
+# линуксовый гейт CI падал на `cannot find module or crate sysinfo`.
+#
+# Крейт уже в `Cargo.lock` — скачивать нечего. Фича одна, «system»: нужны
+# процессы и имя машины, не диски и не сеть.
+sysinfo = { version = "0.31", default-features = false, features = ["system"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Трею нужен инициализированный GTK и прокрутка его цикла (`tray::init`,
@@ -113,11 +128,6 @@ raw-window-handle = { version = "0.6", optional = true }
 # Ради HWND окна: GPUI реализует `HasWindowHandle`, но сам типаж наружу не
 # отдаёт. Новой сборки крейт не добавляет — он уже в зависимостях gpui.
 raw-window-handle = { version = "0.6", optional = true }
-# Список процессов платформы (`bridge::configurator_count`) без подпроцесса:
-# полный `tasklist` стоил 330–510 мс (замер ревью), а спрашивается это на
-# каждом такте. Крейт уже в `Cargo.lock` — скачивать нечего. Фича одна,
-# «system»: нужны процессы, не диски и не сеть.
-sysinfo = { version = "0.31", default-features = false, features = ["system"] }
 # Win32_Security_Cryptography — ради CryptProtectData/CryptUnprotectData
 # (подложка DPAPI в secrets.rs): шифрование пароля областью пользователя, без
 # ключа на диске.

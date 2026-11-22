@@ -175,7 +175,9 @@ pub fn analyzer_fact(ours: Option<&str>, want: &[(&'static str, String)], have: 
 /// же становится причиной холодного замка.
 pub fn platform_fact(choice: &Result<crate::platform::Choice, String>, others: &[String]) -> Check {
     match choice {
-        Err(e) => Check::fail_code(1503, PLATFORM, e.clone(), "установите нужную версию платформы 1С или исправьте platform в 1c-connect.toml"),
+        Err(e) => {
+            Check::fail_code(1503, PLATFORM, e.clone(), "установите нужную версию платформы 1С или исправьте platform в 1c-connect.toml")
+        }
         Ok(c) => {
             let mut detail = format!("{} ({}) — {}", c.version, c.exe.display(), c.why);
             if !others.is_empty() {
@@ -199,9 +201,12 @@ pub fn gitea_address_fact() -> Check {
 /// работает, — иначе провал «не отвечает» не говорит, куда она стучалась.
 pub fn gitea_fact(g: &Gitea, url: &str) -> Check {
     match g {
-        Gitea::Down(e) => {
-            Check::fail_code(1505, GITEA, format!("{url} не отвечает: {e}"), "среда не поднята или адрес не тот — dev1c-setup check на сервере")
-        }
+        Gitea::Down(e) => Check::fail_code(
+            1505,
+            GITEA,
+            format!("{url} не отвечает: {e}"),
+            "среда не поднята или адрес не тот — dev1c-setup check на сервере",
+        ),
         Gitea::NoOrg => Check::fail_code(
             1506,
             GITEA,
@@ -446,7 +451,9 @@ pub fn tools_fact(kit_root: &std::path::Path) -> Check {
         // `Missing` («в профиле ничего нет») и `Drifted` («на машине одна
         // версия, в комплекте другая»). Остаётся одно — чего-то нет в самом
         // комплекте, и лечится это только целым комплектом.
-        OpState::Missing | OpState::Drifted { .. } => Check::fail_code(1512, TOOLS, "комплект неполный", "скопируйте полный комплект заново"),
+        OpState::Missing | OpState::Drifted { .. } => {
+            Check::fail_code(1512, TOOLS, "комплект неполный", "скопируйте полный комплект заново")
+        }
         OpState::Blocked(d) => Check::fail_code(1513, TOOLS, d, "скопируйте полный комплект заново"),
     }
 }
@@ -821,9 +828,12 @@ fn project_fact(ctx: &Ctx, tools: &std::path::Path) -> Check {
     match crate::project::layout_state(&p) {
         Layout::Ok => Check::pass(PROJECT, format!("{}, ветка {}", p.dir.display(), p.branch)),
         Layout::Missing => Check::fail_code(1531, PROJECT, format!("{} не разложен", p.dir.display()), "1c-connect install (host.project)"),
-        Layout::BaseDir(f) => {
-            Check::fail_code(1532, PROJECT, format!("{} — каталог базы ({f})", p.dir.display()), "project в 1c-connect.toml — другой каталог")
-        }
+        Layout::BaseDir(f) => Check::fail_code(
+            1532,
+            PROJECT,
+            format!("{} — каталог базы ({f})", p.dir.display()),
+            "project в 1c-connect.toml — другой каталог",
+        ),
         Layout::Drifted(d) => Check::fail_code(1533, PROJECT, d, "1c-connect install — поправит ветку, origin и файлы"),
         Layout::NoGitea => Check::fail_code(1534, PROJECT, crate::cfg::NO_GITEA, crate::cfg::NO_GITEA_FIX),
     }
@@ -835,7 +845,12 @@ pub fn params_fact(file_exists: bool, server: &str) -> Check {
     if file_exists {
         Check::pass(PARAMS, format!("среда {server}"))
     } else {
-        Check::fail_code(1535, PARAMS, "1c-connect.toml нет в комплекте", "1c-connect example > 1c-connect.toml, затем впишите свои значения")
+        Check::fail_code(
+            1535,
+            PARAMS,
+            "1c-connect.toml нет в комплекте",
+            "1c-connect example > 1c-connect.toml, затем впишите свои значения",
+        )
     }
 }
 

@@ -236,10 +236,16 @@ mod tests {
     /// Выброшенное заменяем пустой строкой, а не удаляем: номер строки в
     /// жалобе сторожа должен вести в настоящее место файла, иначе он отправит
     /// человека гадать — ровно то, против чего вся работа.
-    fn without_tests(src: &str) -> String {
+    ///
+    /// Не нашлась закрывающая скобка — паника, а не молчаливое проглатывание
+    /// остатка файла: проглоченное зеленит сторожа, а сторож, зелёный от
+    /// слепоты, хуже отсутствующего.
+    fn without_tests(path: &str, src: &str) -> String {
         let mut out = String::with_capacity(src.len());
         let mut lines = src.lines();
+        let mut at = 0;
         while let Some(line) = lines.next() {
+            at += 1;
             if !line.trim_start().starts_with("#[cfg(test)]") {
                 out.push_str(line);
                 out.push('\n');
@@ -247,18 +253,30 @@ mod tests {
             }
             out.push('\n');
             let Some(first) = lines.next() else { break };
+            at += 1;
             out.push('\n');
             if !first.contains('{') && first.trim_end().ends_with(';') {
                 continue;
             }
+            let opened = at;
+            let mut closed = false;
             for l in lines.by_ref() {
+                at += 1;
                 out.push('\n');
                 if l == "}" {
+                    closed = true;
                     break;
                 }
             }
+            assert!(closed, "{path}: блок под `#[cfg(test)]` со строки {opened} не закрылся `}}` в нулевой колонке — сторож не знает, где кончается тест");
         }
         out
+    }
+
+    /// Текст файла, в котором остался только код: ни тестов, ни комментариев.
+    /// `path` нужен лишь затем, чтобы жалоба называла файл.
+    fn code_only(path: &str, src: &str) -> String {
+        without_comments(&without_tests(path, src))
     }
 
     /// Выбросить строчные комментарии. Без этого сторож ловил бы прозу:
@@ -299,73 +317,120 @@ mod tests {
         out
     }
 
-    /// Текст файла, в котором остался только код: ни тестов, ни комментариев.
-    fn code_only(src: &str) -> String {
-        without_comments(&without_tests(src))
-    }
-
-    /// Номера, выданные в этом тексте. Берём только безымянные
-    /// четырёхзначные литералы среди аргументов вызова: `say(c.code, …)` и
-    /// объявление `fail_code(code: u16, …)` номера не выдают.
-    fn codes_in(src: &str) -> Vec<u16> {
+    /// Номера, выданные в этом тексте, и жалобы на то, чего сторож не разобрал.
+    /// Номер — безымянный числовой литерал среди аргументов вызова: `say(c.code,
+    /// …)` и объявление `fail_code(code: u16, …)` номера не выдают.
+    ///
+    /// Жалоба, а не пропуск, — потому что молча-зелёный сторож хуже отсутствия:
+    /// выпавший из реестра номер не проверяется на столкновение, а «ровно
+    /// четыре цифры» — первое ограничение замысла, и кроме как здесь его никто
+    /// не проверяет.
+    fn codes_in(src: &str) -> (Vec<u16>, Vec<String>) {
         let mut out = Vec::new();
+        let mut gripes = Vec::new();
         for call in CALLS {
             let mut from = 0;
             while let Some(at) = src[from..].find(call) {
-                let open = from + at + call.len();
+                let start = from + at;
+                let open = start + call.len();
                 from = open;
-                for arg in args_at(src, open) {
-                    if arg.len() == 4 && arg.bytes().all(|b| b.is_ascii_digit()) {
-                        if let Ok(n) = arg.parse::<u16>() {
-                            out.push(n);
-                        }
+                let line = src[..start].matches('\n').count() + 1;
+                let Some(args) = args_at(src, open) else {
+                    gripes.push(format!("строка {line}: `{call}` — аргументы не разобрались, номер не попал в реестр"));
+                    continue;
+                };
+                for arg in args {
+                    if arg.is_empty() || !arg.bytes().all(|b| b.is_ascii_digit()) {
+                        continue;
+                    }
+                    match arg.parse::<u16>() {
+                        Ok(n) if arg.len() == 4 => out.push(n),
+                        _ => gripes.push(format!("строка {line}: `{call}` с номером {arg} — номер это ровно четыре цифры")),
                     }
                 }
             }
         }
-        out
+        (out, gripes)
+    }
+
+    /// Длина символьного литерала, начинающегося здесь, или `None`, если это
+    /// время жизни (`'a`). Без различения `'"'` открывал бы строку, разбор
+    /// срывался бы до конца файла, и номер выпадал из реестра — а таких
+    /// аргументов в крейте полно (`s.trim_matches('"')`).
+    fn char_lit(cs: &[char], i: usize) -> Option<usize> {
+        if cs.get(i) != Some(&'\'') {
+            return None;
+        }
+        if cs.get(i + 1) == Some(&'\\') {
+            // Экранированный: `'\n'`, `'\\'`, `'\u{41}'` — закрывающая кавычка
+            // недалеко, дальше девяти знаков символьных литералов не бывает.
+            return (i + 2..=i + 9).find(|&j| cs.get(j) == Some(&'\'')).map(|j| j - i + 1);
+        }
+        if cs.get(i + 2) == Some(&'\'') {
+            Some(3)
+        } else {
+            None
+        }
     }
 
     /// Аргументы вызова, уже разделённые по запятым верхнего уровня. Вложенные
-    /// скобки и строковые литералы разделителями не считаем: иначе
+    /// скобки, строковые и символьные литералы разделителями не считаем: иначе
     /// `format!("а, б")` развалил бы список.
-    fn args_at(src: &str, open: usize) -> Vec<String> {
+    ///
+    /// `None` значит «не разобрал»: вызов не закрылся или строка не закрыта.
+    /// Отдельный ответ нужен затем, чтобы `codes_in` пожаловался — тихо
+    /// выпавший из реестра номер это несработавшая проверка столкновений, то
+    /// есть дыра ровно там, где её не видно.
+    fn args_at(src: &str, open: usize) -> Option<Vec<String>> {
+        let cs: Vec<char> = src[open..].chars().collect();
         let mut args = vec![String::new()];
         let mut depth = 0i32;
-        let mut in_str = false;
-        let mut escaped = false;
-        for ch in src[open..].chars() {
-            if in_str {
-                if escaped {
-                    escaped = false;
-                } else if ch == '\\' {
-                    escaped = true;
-                } else if ch == '"' {
-                    in_str = false;
-                }
-                args.last_mut().expect("список аргументов не пуст").push(ch);
-                continue;
-            }
+        let mut i = 0;
+        while let Some(&ch) = cs.get(i) {
+            let arg = args.last_mut().expect("список аргументов не пуст");
             match ch {
-                '"' => in_str = true,
+                '"' => {
+                    // Строковый литерал целиком: запятые и скобки внутри — текст.
+                    let mut j = i + 1;
+                    let end = loop {
+                        match cs.get(j) {
+                            None => return None, // строка не закрыта
+                            Some('\\') => j += 2,
+                            Some('"') => break j,
+                            Some(_) => j += 1,
+                        }
+                    };
+                    arg.extend(&cs[i..=end]);
+                    i = end + 1;
+                    continue;
+                }
+                '\'' if char_lit(&cs, i).is_some() => {
+                    let n = char_lit(&cs, i).expect("только что проверили");
+                    arg.extend(&cs[i..i + n]);
+                    i += n;
+                    continue;
+                }
                 '(' | '[' | '{' => depth += 1,
-                ')' | ']' | '}' if depth == 0 => return args.iter().map(|a| a.trim().to_string()).collect(),
+                ')' | ']' | '}' if depth == 0 => return Some(args.iter().map(|a| a.trim().to_string()).collect()),
                 ')' | ']' | '}' => depth -= 1,
                 ',' if depth == 0 => {
                     args.push(String::new());
+                    i += 1;
                     continue;
                 }
                 // Вызов часто разбит на строки (`Check::fail(` с аргументами
                 // столбиком): перевод строки не конец вызова, а просто пробел.
                 '\n' => {
-                    args.last_mut().expect("список аргументов не пуст").push(' ');
+                    arg.push(' ');
+                    i += 1;
                     continue;
                 }
                 _ => {}
             }
             args.last_mut().expect("список аргументов не пуст").push(ch);
+            i += 1;
         }
-        Vec::new()
+        None
     }
 
     /// Голые отказы этого текста. `code_bail!`/`code_ensure!` содержат `bail!`
@@ -396,6 +461,7 @@ mod tests {
         let root = workshop();
         let mut owner: BTreeMap<u16, Vec<String>> = BTreeMap::new();
         let mut bare: Vec<String> = Vec::new();
+        let mut unparsed: Vec<String> = Vec::new();
 
         for (path, text) in sources(&root) {
             // Отдельные файлы тестов (`gui/log/tests.rs`) — целиком не наше
@@ -403,10 +469,12 @@ mod tests {
             if path.ends_with("/tests.rs") {
                 continue;
             }
-            let code = code_only(&text);
-            for n in codes_in(&code) {
+            let code = code_only(&path, &text);
+            let (codes, gripes) = codes_in(&code);
+            for n in codes {
                 owner.entry(n).or_default().push(path.clone());
             }
+            unparsed.extend(gripes.into_iter().map(|g| format!("{path}: {g}")));
             if UNCOVERED.iter().any(|u| path.starts_with(u)) {
                 continue;
             }
@@ -414,6 +482,10 @@ mod tests {
                 bare.push(format!("{path}: {found}"));
             }
         }
+
+        // Сперва неразобранное: пока сторож чего-то не понял, его молчание об
+        // остальном ничего не значит.
+        assert!(unparsed.is_empty(), "сторож не разобрал номера — он не вправе быть зелёным:\n{}", unparsed.join("\n"));
 
         let twice: Vec<String> =
             owner.iter().filter(|(_, w)| w.len() > 1).map(|(n, w)| format!("{n} выдан {} раз: {}", w.len(), w.join(", "))).collect();
@@ -437,26 +509,57 @@ mod tests {
 
     #[test]
     fn the_guard_sees_what_it_looks_for() {
-        // Сторож над пустым множеством зелен и слеп. Эти два утверждения
-        // ловят именно слепоту: разбор номеров и поиск голых отказов должны
-        // срабатывать на настоящих файлах мастерской, а не только в теории.
+        // Сторож над пустым множеством зелен и слеп, а настоящих номеров в
+        // мастерской пока ноль. Этот тест ловит именно слепоту.
+        //
+        // Привязки к имени размечаемого файла здесь нет нарочно: задачи 3…7
+        // разметят его, утверждение покраснело бы с обманчивым текстом, и
+        // очевидной «починкой» было бы выкинуть единственную живую проверку.
+        // Вместо имени — инвариант обхода, который стереть нельзя.
         let root = workshop();
-        let ops = std::fs::read_to_string(root.join("1c-connect/src/ops_host.rs")).expect("ops_host.rs на месте");
-        assert!(!bare_refusals_in(&code_only(&ops)).is_empty(), "в ops_host.rs голые отказы есть — значит, они и должны находиться");
+        let seen = sources(&root);
+        assert!(seen.len() >= 30, "обход мастерской нашёл {} исходников — столько мало, обход сломан", seen.len());
+        for u in UNCOVERED {
+            assert!(root.join(u).exists(), "в UNCOVERED есть `{u}`, а на диске его нет: список разошёлся с мастерской");
+        }
+
         // Проза о механизме отказом не считается, а код — считается.
-        assert!(bare_refusals_in(&code_only("/// как `anyhow::bail!`, но с номером")).is_empty());
+        assert!(bare_refusals_in(&code_only("образец", "/// как `anyhow::bail!`, но с номером")).is_empty());
+        assert_eq!(bare_refusals_in("anyhow::bail!(\"x\")").len(), 1);
+        assert!(bare_refusals_in("code_bail!(1204, \"x\")").is_empty());
 
         // Номер строки ведёт в настоящее место файла и после выброшенного
         // теста: иначе жалоба сторожа отправляет человека гадать.
         let file = "fn a() {}\n#[cfg(test)]\nmod t {\n    fn q() {}\n}\nfn b() -> R {\nbail!(\"x\")\n}\n";
-        assert_eq!(bare_refusals_in(&code_only(file)), vec!["bail! в строке 7".to_string()]);
-
-        let sample = "код: say(1204, format!(\"а, б\")) и code_ensure!(port == 1541, 1512, \"занято\") и fail_code(1501, \"база\")";
-        assert_eq!(codes_in(sample), vec![1204, 1512, 1501]);
+        assert_eq!(bare_refusals_in(&code_only("образец", file)), vec!["bail! в строке 7".to_string()]);
 
         // Условие с четырёхзначным числом (1541) номером не считается: оно не
-        // стоит отдельным аргументом. А голый `anyhow::bail!` — считается.
-        assert_eq!(bare_refusals_in("anyhow::bail!(\"x\")").len(), 1);
-        assert!(bare_refusals_in("code_bail!(1204, \"x\")").is_empty());
+        // стоит отдельным аргументом.
+        let sample = "код: say(1204, format!(\"а, б\")) и code_ensure!(port == 1541, 1512, \"занято\") и fail_code(1501, \"база\")";
+        assert_eq!(codes_in(sample), (vec![1204, 1512, 1501], vec![]));
+
+        // Символьный литерал в аргументах разбор не срывает: `'"'` когда-то
+        // открывал строку, и номер выпадал из реестра молча.
+        let quoted = "code_bail!(1204, \"нет {}\", s.trim_matches('\"'))";
+        assert_eq!(codes_in(quoted), (vec![1204], vec![]));
+
+        // А если разбор всё же срывается (вызов не закрыт) — жалоба, не пропуск.
+        let torn = "code_bail!(1204, \"нет\n";
+        assert_eq!(codes_in(torn).0, vec![]);
+        assert_eq!(codes_in(torn).1.len(), 1, "{:?}", codes_in(torn).1);
+
+        // Номер не из четырёх цифр не проходит молча: «ровно четыре цифры» —
+        // первое ограничение замысла, и кроме как здесь его никто не проверяет.
+        assert_eq!(codes_in("say(140, \"мало\")").0, vec![]);
+        assert_eq!(codes_in("say(140, \"мало\")").1.len(), 1);
+        assert_eq!(codes_in("fail_code(12345, \"много\")").1.len(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "не закрылся")]
+    fn an_unclosed_test_block_is_red_not_swallowed() {
+        // Проглоченный остаток файла зеленит сторожа. Зелёный от слепоты он
+        // хуже отсутствующего, поэтому здесь паника, а не тишина.
+        code_only("образец", "#[cfg(test)]\nmod t {\n    fn q() {}\nbail!(\"x\")\n");
     }
 }

@@ -139,9 +139,26 @@ fn connect_key_of_value(value: &str) -> Option<String> {
     Some(connect_key(&base_path_of_value(value)?))
 }
 
+/// Тот ли это ключ строки `ibases.v8i`. Одно сравнение на оба разбора файла —
+/// выбор базы (`bases_in`) и поиск пина версии (`base_pin`).
+///
+/// Регистр не считается: 1С пишет `Connect`/`Version`, но файл правят руками, и
+/// `connect=` в нём законен. Пока сравнений было два, они расходились ровно
+/// этим и расходились МОЛЧА — база из списка выбиралась, а её `Version=` не
+/// находился, и пин терялся без единого слова, то есть ровно тем исходом,
+/// против которого сделана первая половина ветки.
+fn is_key(key: &str, want: &str) -> bool {
+    key.trim().eq_ignore_ascii_case(want)
+}
+
 /// Базы из списка 1С: имя секции, как его показывает запускатель, и строка
-/// базы в нашей форме. Разбор тот же, что у пина версии (`base_pin`), — файл
-/// один и тот же, и второго разбора ему не нужно.
+/// базы в нашей форме.
+///
+/// Разборов у файла два — этот, по разделам, и поиск пина (`base_pin`), по
+/// одной базе, — и сводить их в один нельзя: он отвечает на другой вопрос.
+/// Общим у них обязано быть СРАВНЕНИЕ КЛЮЧА (`is_key`), и оно общее: прежде
+/// здесь регистр не считался, а в `base_pin` считался, и доктекст обещал
+/// «разбор тот же», чего не было.
 pub fn bases_in(v8i: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut name: Option<String> = None;
@@ -152,7 +169,7 @@ pub fn bases_in(v8i: &str) -> Vec<(String, String)> {
             continue;
         }
         let Some((k, v)) = t.split_once('=') else { continue };
-        if !k.trim().eq_ignore_ascii_case("Connect") {
+        if !is_key(k, "Connect") {
             continue;
         }
         // Секция без имени — не показываем: выбирать человеку нечего.
@@ -214,10 +231,10 @@ pub fn base_pin(v8i: &str, base_path: &str) -> Option<String> {
             continue;
         }
         let Some((k, v)) = t.split_once('=') else { continue };
-        match k.trim() {
-            "Connect" => connect = connect_key_of_value(v),
-            "Version" => version = Some(v.trim().trim_matches('"').to_string()).filter(|s: &String| !s.is_empty()),
-            _ => {}
+        if is_key(k, "Connect") {
+            connect = connect_key_of_value(v);
+        } else if is_key(k, "Version") {
+            version = Some(v.trim().trim_matches('"').to_string()).filter(|s: &String| !s.is_empty());
         }
     }
     if matched.is_none() && connect.as_deref() == Some(want.as_str()) {
@@ -471,6 +488,20 @@ mod tests {
         // Регистр и вид разделителей не считаются: тот же каталог.
         assert_eq!(base_pin(V8I, "C:\\Bases\\Buh").as_deref(), Some("8.3.21"));
         assert_eq!(base_pin(V8I, "c:/bases/buh/").as_deref(), Some("8.3.21"));
+    }
+
+    /// Выбор базы и поиск её пина читают файл ОДНИМ сравнением ключа.
+    ///
+    /// Расходились они молча и ровно тем исходом, против которого сделана
+    /// первая половина ветки: `bases_in` сравнивала `Connect` без учёта
+    /// регистра, `base_pin` — с учётом, и база из списка выбиралась, а её
+    /// `Version=` не находился — пин терялся без единого слова. Файл правят
+    /// руками, регистр ключа в нём не значим.
+    #[test]
+    fn both_readers_of_the_base_list_treat_the_key_case_the_same_way() {
+        let v8i = "\u{feff}[Бухгалтерия]\r\nCONNECT=File=\"C:\\Bases\\Buh\";\r\nversion=8.3.21\r\n";
+        assert_eq!(bases_in(v8i), vec![("Бухгалтерия".to_string(), "C:\\Bases\\Buh".to_string())]);
+        assert_eq!(base_pin(v8i, "C:\\Bases\\Buh").as_deref(), Some("8.3.21"));
     }
 
     #[test]

@@ -264,6 +264,12 @@ fn missing(want: &str, source: &str, installed: &[(String, PathBuf)]) -> String 
 ///
 /// `Err` — либо платформы нет вовсе, либо назван пин, которого на машине нет:
 /// в обоих случаях текст годится и факту проверки, и причине замка.
+///
+/// Номера отказа здесь нет НАРОЧНО: у этого текста два потребителя с разными
+/// номерами. Ворота берут его через `ops_host::platform_choice` — та ставит
+/// 1403; отчёт «Проверить» — через `ops_host::platform_report`, и у его факта
+/// номер свой (`verify::platform_fact`, 1503). Номер, поставленный здесь, стал
+/// бы вторым числом про одно место на второй поверхности.
 pub fn resolve(cfg: &Cfg, installed: &[(String, PathBuf)], pins: &Pins) -> Result<Choice, String> {
     if installed.is_empty() {
         return Err("платформа 1С не найдена".into());

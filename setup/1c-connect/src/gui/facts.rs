@@ -308,7 +308,10 @@ pub fn spawn_full_pass(ui: &Ui, gen: u64, loud: bool) {
                 }
                 Ev::Ready(gen, facts, loud)
             },
-            move || Ev::Ready(gen, vec![Check::fail("готовность", PANIC_TEXT, "нажмите «Проверить»")], loud),
+            // Область 15 (факт проверки), а не 16: это исход набора готовности,
+            // просто добытый не проверкой, а упавшим потоком. Хвост задачи 5 —
+            // голым он остался один на весь крейт.
+            move || Ev::Ready(gen, vec![Check::fail_code(1538, "готовность", PANIC_TEXT, "нажмите «Проверить»")], loud),
         );
     });
 }

@@ -18,7 +18,7 @@ pub fn desktop_entry(exe: &Path) -> String {
 #[cfg(windows)]
 mod imp {
     use super::run_value;
-    use anyhow::{bail, Context, Result};
+    use anyhow::{Context, Result};
     use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
     use windows_sys::Win32::System::Registry::{
         RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegGetValueW, RegOpenKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
@@ -79,7 +79,7 @@ mod imp {
             )
         };
         if r != ERROR_SUCCESS {
-            bail!("не открыть раздел автозапуска в реестре (код {r})");
+            common::code_bail!(1105, "не открыть раздел автозапуска в реестре (код {r})");
         }
         let value = wide(VALUE);
         // REG_SZ — байты UTF-16 с замыкающим нулём, который уже есть в `data`.
@@ -87,7 +87,7 @@ mod imp {
         let set_r = unsafe { RegSetValueExW(hkey, value.as_ptr(), 0, REG_SZ, bytes.as_ptr(), bytes.len() as u32) };
         unsafe { RegCloseKey(hkey) };
         if set_r != ERROR_SUCCESS {
-            bail!("не записать значение автозапуска (код {set_r})");
+            common::code_bail!(1106, "не записать значение автозапуска (код {set_r})");
         }
         Ok(())
     }
@@ -101,13 +101,13 @@ mod imp {
             return Ok(());
         }
         if r != ERROR_SUCCESS {
-            bail!("не открыть раздел автозапуска в реестре (код {r})");
+            common::code_bail!(1107, "не открыть раздел автозапуска в реестре (код {r})");
         }
         let value = wide(VALUE);
         let del_r = unsafe { RegDeleteValueW(hkey, value.as_ptr()) };
         unsafe { RegCloseKey(hkey) };
         if del_r != ERROR_SUCCESS && del_r != ERROR_FILE_NOT_FOUND {
-            bail!("не удалить значение автозапуска (код {del_r})");
+            common::code_bail!(1108, "не удалить значение автозапуска (код {del_r})");
         }
         Ok(())
     }

@@ -126,7 +126,7 @@ pub const PUMP: std::time::Duration = std::time::Duration::from_millis(50);
 /// между потоками нечего.
 #[cfg(target_os = "linux")]
 pub fn init() -> anyhow::Result<()> {
-    gtk::init().map_err(|e| anyhow::anyhow!("GTK не инициализирован: {e}"))
+    gtk::init().map_err(|e| anyhow::Error::msg(common::code::say(1109, format!("GTK не инициализирован: {e}"))))
 }
 
 /// На остальных системах трею GTK не нужен.

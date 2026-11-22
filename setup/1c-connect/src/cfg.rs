@@ -341,7 +341,7 @@ impl Cfg {
     }
 
     pub fn validate(&self) -> Result<()> {
-        anyhow::ensure!(self.number().is_some(), "[host]: workstation — dev1, dev2 или dev3 (ваш логин в среде)");
+        common::code_ensure!(self.number().is_some(), 1001, "[host]: workstation — dev1, dev2 или dev3 (ваш логин в среде)");
         // Адрес среды спрашиваем только там, где по нему ходят. В локальном
         // режиме базы лежат рядом, туннеля нет, и поле не заполняет никто —
         // ни стенд, ни программа (`a_local_workstation_gets_no_made_up_environment_address`).
@@ -351,21 +351,25 @@ impl Cfg {
         // стенд делает сам при первом старте. Рабочее место оставалось без
         // проекта, публикации и расширения в базе, то есть агент в редакторе
         // оставался без инструментов 1С (живой стенд, 27.10.2026).
-        anyhow::ensure!(
+        common::code_ensure!(
             self.host.mode == "local" || self.host.server.contains(':'),
+            1002,
             "[host]: server — адрес и порт через двоеточие, например 192.168.1.10:3393"
         );
         let g = self.host.gitea.trim();
-        anyhow::ensure!(
+        common::code_ensure!(
             g.is_empty() || g.starts_with("http://") || g.starts_with("https://"),
+            1003,
             "[host]: gitea — полный адрес Gitea среды, например http://localhost:3000 (пусто — адрес не задан, его пишет 1c-connect install)"
         );
-        anyhow::ensure!(
+        common::code_ensure!(
             matches!(self.host.mode.as_str(), "tunnel" | "local"),
+            1004,
             "[host]: mode — \"tunnel\" (туннель в среду) или \"local\" (база внутри образа)"
         );
-        anyhow::ensure!(
+        common::code_ensure!(
             matches!(self.host.publication.as_str(), "auto" | "webserver"),
+            1005,
             "[host]: publication — \"auto\" (публикует сама программа) или \"webserver\" (уже опубликовано на Apache/IIS)"
         );
         // Пустой `base_url` — не ошибка, а «не задан»: поля для него в окне
@@ -377,21 +381,28 @@ impl Cfg {
         // `webserver`, и опечатка в нём стоит человеку часа.
         let u = &self.host.base_url;
         if !u.is_empty() {
-            anyhow::ensure!(
+            common::code_ensure!(
                 u.starts_with("http://localhost") || u.starts_with("http://127.0.0.1"),
+                1006,
                 "[host]: адрес публикации — база на ЭТОЙ машине, адрес начинается с http://localhost (поле base_url)"
             );
-            anyhow::ensure!(u.contains(SERVICE_PATH), "[host]: адрес публикации должен заканчиваться на /hs/mcp-1c (поле base_url)");
-            anyhow::ensure!(
+            common::code_ensure!(
+                u.contains(SERVICE_PATH),
+                1007,
+                "[host]: адрес публикации должен заканчиваться на /hs/mcp-1c (поле base_url)"
+            );
+            common::code_ensure!(
                 u.chars().all(|c| c.is_ascii_alphanumeric() || "-._~:/".contains(c)),
+                1008,
                 "[host]: адрес публикации — только латиница, цифры и -._~:/ (путь без пробелов и спецсимволов)"
             );
         }
-        anyhow::ensure!(!self.host.base_path.is_empty(), "[host]: base_path — путь к базе или сервер\\база");
+        common::code_ensure!(!self.host.base_path.is_empty(), 1009, "[host]: base_path — путь к базе или сервер\\база");
         let p = &self.host.project;
         let full = p.len() > 2 && (p.as_bytes()[1] == b':' || p.starts_with('/') || p.starts_with("\\\\"));
-        anyhow::ensure!(
+        common::code_ensure!(
             full && !p.contains('"') && !p.contains('%'),
+            1010,
             "[host]: project — полный путь к каталогу проекта без кавычек и %, например C:\\proj\\Buh"
         );
         Ok(())
@@ -652,6 +663,17 @@ mod tests {
         // Написанный — проверяется как раньше.
         c.host.base_url = "ftp://localhost/x".into();
         assert!(c.validate().unwrap_err().to_string().contains("base_url"));
+    }
+
+    /// Отказ разбора параметров называет свой номер, и номер этот — из
+    /// области 10. По телефону человек диктует четыре цифры, и попасть по ним
+    /// надо ровно в ту строку `validate`, которая не сошлась.
+    #[test]
+    fn a_bad_parameter_file_says_its_number() {
+        let mut c = filled();
+        c.host.base_path = String::new();
+        let e = c.validate().unwrap_err().to_string();
+        assert!(common::code::split(&e).0.is_some_and(|n| n / 100 == 10), "{e}");
     }
 
     /// Незаполненный образец проверку НЕ проходит — и это правильно: окно на
@@ -956,9 +978,14 @@ mod tests {
         for typed in ["http://192.168.1.10/Buh", "http://localhost/Бух", "http://localhost/My Base"] {
             c.host.base_url = full_base_url(typed);
             let e = c.validate().unwrap_err().to_string();
-            // Ведёт то, что человек видел в окне, — «адрес публикации»;
-            // имя поля в toml стоит после, для того, кто правит файл.
-            assert!(e.starts_with("[host]: адрес публикации"), "{typed}: {e}");
+            // Номер идёт впереди по закону (`common::code`), поэтому проверяем
+            // слова ЗА ним: ведёт то, что человек видел в окне, — «адрес
+            // публикации»; имя поля в toml стоит после, для того, кто правит
+            // файл. И номер обязан быть — иначе проверка слов прошла бы и на
+            // отказе без номера.
+            let (code, words) = common::code::split(&e);
+            assert!(code.is_some_and(|n| n / 100 == 10), "{typed}: {e}");
+            assert!(words.starts_with("[host]: адрес публикации"), "{typed}: {e}");
         }
     }
 

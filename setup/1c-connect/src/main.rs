@@ -117,8 +117,16 @@ fn main() {
         // пишет в журнал: в терминале человек так же не должен отличать
         // ограничение по числу сеансов от поломки по виду сырого сообщения
         // (`onec_error`).
-        if let Some(c) = one_c_connect::onec_error::explain(&text) {
-            eprintln!("{}", one_c_connect::onec_error::hint_line(c));
+        //
+        // Строка с НОМЕРАМИ (`explain_line`), а не `hint_line`: по телефону
+        // диктуют и из терминала, а `hint_line` номера не несёт вовсе — окно
+        // называло причине номер, терминал молчал, и ровно та же причина
+        // опознавалась двумя разными способами. Совет (`fix`) идёт следом
+        // отдельной строкой: он длинный и в номер не лезет.
+        use one_c_connect::onec_error;
+        if let (Some(c), Some(line)) = (onec_error::explain(&text), onec_error::explain_line(&text)) {
+            eprintln!("{line}");
+            eprintln!("{}", c.fix);
         }
         std::process::exit(1);
     }
@@ -192,7 +200,7 @@ fn run() -> Result<()> {
     if matches!(cmd, Cmd::Install | Cmd::Uninstall | Cmd::Export { .. } | Cmd::Import)
         && matches!(licence::state_now(), licence::State::Expired)
     {
-        anyhow::bail!("{}", licence::REFUSAL);
+        common::code_bail!(1101, "{}", licence::REFUSAL);
     }
     match cmd {
         Cmd::Example => unreachable!(),
@@ -244,11 +252,15 @@ fn run() -> Result<()> {
         Cmd::Connect => connect(&ctx)?,
         Cmd::Serve => serve(&ctx)?,
         Cmd::Export { message } => {
-            let t = flow::export(&ctx, &message, &project::NEVER).map_err(|e| anyhow::anyhow!("{e}"))?;
+            // Своего номера здесь нет нарочно: строка приходит из `flow` уже с
+            // номером области 14, и второй номер поверх сделал бы из одного
+            // отказа два. Перенос в `anyhow` — упаковка, а не отказ.
+            let t = flow::export(&ctx, &message, &project::NEVER).map_err(anyhow::Error::msg)?;
             println!("{t}");
         }
         Cmd::Import => {
-            let t = flow::import(&ctx, &project::NEVER).map_err(|e| anyhow::anyhow!("{e}"))?;
+            // Тоже упаковка чужой строки — см. `Cmd::Export` выше.
+            let t = flow::import(&ctx, &project::NEVER).map_err(anyhow::Error::msg)?;
             println!("{t}");
         }
         Cmd::Check => check(&ctx, None)?,
@@ -257,7 +269,7 @@ fn run() -> Result<()> {
             for e in r.entries.iter().filter(|e| e.state != common::integrity::FileState::Ok) {
                 println!("  [FAIL] {}: {:?}", e.path, e.state);
             }
-            anyhow::ensure!(r.ok(), "комплект повреждён — скопируйте его заново");
+            common::code_ensure!(r.ok(), 1102, "комплект повреждён — скопируйте его заново");
             println!("Комплект цел.");
         }
         Cmd::Checksums => {
@@ -281,7 +293,10 @@ fn check(ctx: &Ctx, tunnel_state: Option<&str>) -> Result<()> {
     common::kit::write_text(&path, &text)?;
     println!();
     println!("Пройдено {p}, провалено {f}. Отчёт: {}", path.display());
-    anyhow::ensure!(f == 0, "проверка не пройдена");
+    // Номер области 11, а не 15: это итог команды, а не отдельный факт. Свои
+    // номера у фактов уже есть, и человек диктует именно их — сюда он попадёт
+    // только тогда, когда не разобрал, какой из фактов красный.
+    common::code_ensure!(f == 0, 1103, "проверка не пройдена");
     Ok(())
 }
 
@@ -297,8 +312,12 @@ impl Drop for OffOnExit<'_> {
 /// Туннель плюс мост, пока не нажмут Ctrl+C или сеанс не упадёт сам.
 fn connect(ctx: &Ctx) -> Result<()> {
     let params = ctx.kit.state_path(cfg::FILE);
-    anyhow::ensure!(
+    // Область 10, а не 11: отказ про файл параметров, и слова у него те же, что
+    // у `serve`. Номера разные затем, чтобы по четырём цифрам было видно, какую
+    // из двух команд человек запускал, — один номер на два места не бывает.
+    common::code_ensure!(
         params.exists(),
+        1011,
         "нет файла параметров {} — создайте его из образца: 1c-connect example > {}",
         params.display(),
         params.display()
@@ -350,8 +369,10 @@ fn publication_failure_text(result: &Result<()>) -> Option<String> {
 /// стенда закрывали мосты штатно и срабатывала уборка группы процессов.
 fn serve(ctx: &Ctx) -> Result<()> {
     let params = ctx.kit.state_path(cfg::FILE);
-    anyhow::ensure!(
+    // Тот же отказ, что у `connect`, но из `serve` — см. 1011.
+    common::code_ensure!(
         params.exists(),
+        1012,
         "нет файла параметров {} — создайте его из образца: 1c-connect example > {}",
         params.display(),
         params.display()

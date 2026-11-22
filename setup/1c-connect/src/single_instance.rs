@@ -428,7 +428,10 @@ pub fn acquire(kit: &Kit, workstation: &str) -> anyhow::Result<Guard> {
             if raise_other() {
                 std::process::exit(0);
             }
-            anyhow::bail!("рабочее место {workstation} занято: коннектор для него уже запущен — закройте его перед повторным запуском")
+            common::code_bail!(
+                1104,
+                "рабочее место {workstation} занято: коннектор для него уже запущен — закройте его перед повторным запуском"
+            )
         }
     }
 }

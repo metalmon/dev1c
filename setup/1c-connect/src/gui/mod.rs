@@ -464,11 +464,11 @@ pub fn tray_tooltip(progress: Option<&Running>, link: &State, verdict: &Verdict,
     if let (None, Some(why)) = (progress, gate) {
         // Та же формулировка, что у подсказки переключателя и подвала:
         // три поверхности говорили о замке тремя разными фразами.
-        return format!("1c-connect: {}", crate::gui::panel::gate_text(why).to_lowercase());
+        return tip(crate::gui::panel::gate_text(why).to_lowercase());
     }
     if progress.is_none() && link.is_up() {
         if let Some(why) = warn_reason(verdict) {
-            return format!("1c-connect: {why}");
+            return tip(why);
         }
         // Набора ещё нет — так и говорим (Minor 10 ревью круга 2; спека: «значок
         // в трее жёлтый, подсказка „проверяю“»). Значок в это время жёлтый
@@ -476,7 +476,7 @@ pub fn tray_tooltip(progress: Option<&Running>, link: &State, verdict: &Verdict,
         // та же ложь, что была в Critical 2, только в трее: зелёное слово под
         // жёлтым значком.
         if matches!(verdict, Verdict::Checking) {
-            return "1c-connect: проверяю".to_string();
+            return tip("проверяю");
         }
     }
     match progress {
@@ -488,9 +488,24 @@ pub fn tray_tooltip(progress: Option<&Running>, link: &State, verdict: &Verdict,
             };
             let mins = now.saturating_duration_since(r.started).as_secs() / 60;
             let when = if mins == 0 { "меньше минуты".to_string() } else { format!("{mins} мин") };
-            format!("1c-connect: {lower}, {when}")
+            tip(format!("{lower}, {when}"))
         }
-        None => format!("1c-connect: {}", if link.is_up() { "подключён" } else { "не подключён" }),
+        None => tip(if link.is_up() { "подключён" } else { "не подключён" }),
+    }
+}
+
+/// Приставка подсказки трея — и единственное место, где она клеится.
+///
+/// Номер вынимается ВПЕРЁД всей фразы. Пока приставка клеилась руками, она
+/// вставала перед номером («1c-connect: 1206 · нельзя включить…»), и номер
+/// оказывался в середине строки — ровно та беда, которую уже лечили в воротах
+/// (`panel::gate_text`). Чинить её пришлось бы на каждом возврате, поэтому
+/// приставка здесь одна: ни один возврат `tray_tooltip` не склеивает её сам.
+fn tip(text: impl AsRef<str>) -> String {
+    let text = text.as_ref();
+    match common::code::split(text) {
+        (Some(code), rest) => common::code::say(code, format!("1c-connect: {rest}")),
+        (None, _) => format!("1c-connect: {text}"),
     }
 }
 

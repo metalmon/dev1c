@@ -267,48 +267,22 @@ mod tests {
     /// так: это правило — главное.
     const BARE: &[&str] = &["bail!", "ensure!", "anyhow!", "Check::fail(", "Check::busy("];
 
-    /// Файлы, где голые отказы пока разрешены. Каждая следующая задача плана
-    /// вычёркивает отсюда свои файлы; когда список опустеет до одной строки
-    /// про `dev1c-setup`, в крейте не останется ни одного отказа без номера.
+    /// Файлы, где голые отказы разрешены. Список усох до того, ради чего
+    /// заводился: из `1c-connect` вычеркнут весь, ни одного отказа без номера в
+    /// этом крейте не осталось, и любой новый голый отказ сторож валит сразу.
+    ///
+    /// Обе оставшиеся записи — не долг, а решения, и каждая названа поимённо:
+    /// расширить список молча нельзя.
     ///
     /// Запись — начало пути: файл целиком или каталог целиком.
     const UNCOVERED: &[&str] = &[
         // `dev1c-setup` ждёт своей очереди: про него ещё не звонят, и номера он
-        // получит, когда начнут. Эта строка остаётся НАВСЕГДА — она здесь одна
-        // и названа поимённо, чтобы её нельзя было забыть и нельзя было
-        // расширить молча.
+        // получит, когда начнут.
         "dev1c-setup/",
         // Внутренний сговор, а не отказ человеку: «нет операции {id}» значит,
         // что программа позвала несуществующий шаг. Такое не диктуют по
         // телефону, номера тут не будет.
         "common/src/run.rs",
-        // Разметка номеров по областям — задачи 3…7 плана.
-        "1c-connect/src/allow.rs",
-        "1c-connect/src/analyzer.rs",
-        "1c-connect/src/bridge.rs",
-        "1c-connect/src/cfg.rs",
-        "1c-connect/src/flow.rs",
-        "1c-connect/src/gui/autostart.rs",
-        "1c-connect/src/gui/facts.rs",
-        "1c-connect/src/gui/gate.rs",
-        "1c-connect/src/gui/link.rs",
-        "1c-connect/src/gui/log.rs",
-        "1c-connect/src/gui/mod.rs",
-        "1c-connect/src/gui/panel.rs",
-        "1c-connect/src/gui/save.rs",
-        "1c-connect/src/gui/theme.rs",
-        "1c-connect/src/gui/tray.rs",
-        "1c-connect/src/gui/window.rs",
-        "1c-connect/src/holder.rs",
-        "1c-connect/src/job.rs",
-        "1c-connect/src/jsonrpc.rs",
-        "1c-connect/src/lib.rs",
-        "1c-connect/src/listen.rs",
-        "1c-connect/src/local.rs",
-        "1c-connect/src/main.rs",
-        "1c-connect/src/session.rs",
-        "1c-connect/src/single_instance.rs",
-        "1c-connect/src/tunnel.rs",
     ];
 
     /// Корень мастерской: рядом с `common` лежат остальные крейты.

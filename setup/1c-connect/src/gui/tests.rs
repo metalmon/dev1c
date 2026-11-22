@@ -211,6 +211,15 @@ fn tooltip_names_the_phase_and_minutes() {
     let why = Some("не задан пользователь базы");
     assert_eq!(tray_tooltip(None, &State::Off, &ok, why, now), "1c-connect: нельзя включить: не задан пользователь базы");
     assert_eq!(tray_tooltip(Some(&r), &State::Off, &ok, why, now), "1c-connect: выгружаю конфигурацию из 1С, 12 мин");
+    // Номер замка стоит ПЕРЕД приставкой, а не в середине строки. Пока
+    // приставка клеилась руками, выходило «1c-connect: 1206 · нельзя
+    // включить…» — номер в середине, то есть ровно та беда, которую уже
+    // лечили в воротах (`panel::gate_text`).
+    let numbered = common::code::say(1206, "не задан пользователь базы");
+    assert_eq!(
+        tray_tooltip(None, &State::Off, &ok, Some(&numbered), now),
+        common::code::say(1206, "1c-connect: нельзя включить: не задан пользователь базы")
+    );
 }
 
 #[test]

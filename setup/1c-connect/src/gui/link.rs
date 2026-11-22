@@ -94,7 +94,12 @@ pub fn douse_serving(ui: &mut Ui) {
     ui.enabled.store(false, Ordering::Relaxed);
     // Непрошедшая запись — не тишина: она оставляет на диске «on» при уже выключенном обслуживании, то есть разрешение, которого человек не давал (минорная находка ревью задачи 2).
     if let Err(e) = crate::allow::write(&ui.kit, false) {
-        note_line(ui, Line { kind: Kind::Warn, text: format!("признак разрешения не записан: {e:#}") });
+        note_line(
+            ui,
+            Line {
+                kind: Kind::Warn, text: common::code::with_prefix("признак разрешения не записан: ", &format!("{e:#}"))
+            },
+        );
     }
     if ui.cfg.host.mode == "local" {
         ui.link = local_display("local", false, ui.link.clone());
@@ -151,7 +156,12 @@ pub fn autostart_enabled(gate: Option<&str>, autoconnect_on: bool) -> bool {
 pub fn publication_failure(ui: &mut Ui, why: &str) -> State {
     ui.enabled.store(false, Ordering::Relaxed);
     if let Err(e) = crate::allow::write(&ui.kit, false) {
-        note_line(ui, Line { kind: Kind::Warn, text: format!("признак разрешения не записан: {e:#}") });
+        note_line(
+            ui,
+            Line {
+                kind: Kind::Warn, text: common::code::with_prefix("признак разрешения не записан: ", &format!("{e:#}"))
+            },
+        );
     }
     // Отказ публикации нумерован (1438 «httpd завершился сразу» и соседи), а
     // эта строка доезжает до подвала, трея, журнала и отказа агенту — всюду,
@@ -302,7 +312,12 @@ pub fn flip_enabled_only(ui: &mut Ui) -> bool {
     let on = !ui.enabled.load(Ordering::Relaxed);
     ui.enabled.store(on, Ordering::Relaxed);
     if let Err(e) = crate::allow::write(&ui.kit, on) {
-        note_line(ui, Line { kind: Kind::Warn, text: format!("признак разрешения не записан: {e:#}") });
+        note_line(
+            ui,
+            Line {
+                kind: Kind::Warn, text: common::code::with_prefix("признак разрешения не записан: ", &format!("{e:#}"))
+            },
+        );
     }
     on
 }
@@ -427,7 +442,12 @@ pub fn toggle_link(cx: &mut App) {
     // которой уже нет (находка ревью).
     cx.global::<Ui>().enabled.store(!on, Ordering::Relaxed);
     if let Err(e) = crate::allow::write(&cx.global::<Ui>().kit, !on) {
-        note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Warn, text: format!("признак разрешения не записан: {e:#}") });
+        note_line(
+            cx.global_mut::<Ui>(),
+            Line {
+                kind: Kind::Warn, text: common::code::with_prefix("признак разрешения не записан: ", &format!("{e:#}"))
+            },
+        );
     }
     if on {
         stop_session(cx);

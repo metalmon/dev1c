@@ -156,9 +156,14 @@ pub fn off_reason() -> Option<String> {
 
 /// Текст отказа: без замка — прежний («включите переключатель»), с замком —
 /// его причина, потому что включать нечего и совет был бы ложью.
+///
+/// Приставка — через `code::with_prefix`: причина замка несёт номер, а этот
+/// текст агент пересказывает человеку, и из пересказа человек звонит. Наивная
+/// склейка увела бы номер в середину единственной фразы, которую он при этом
+/// видит.
 pub fn disabled_text(reason: Option<&str>) -> String {
     match reason {
-        Some(why) => format!("{DISABLED_PREFIX}: {why}"),
+        Some(why) => common::code::with_prefix(&format!("{DISABLED_PREFIX}: "), why),
         None => DISABLED_TEXT.to_string(),
     }
 }

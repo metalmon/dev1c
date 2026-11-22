@@ -242,7 +242,12 @@ fn the_gate_reason_reaches_the_bridge() {
     assert!(ui.gate.is_some(), "в каталоге теста нет ни параметров, ни инструментов — замок заперт");
     let reason = crate::bridge::off_reason();
     assert!(reason.is_some(), "причина замка не доехала до моста");
-    assert!(crate::bridge::disabled_text(reason.as_deref()).starts_with(&format!("{}: ", crate::bridge::DISABLED_PREFIX)));
+    // Приставка стоит ЗА номером (`code::with_prefix`), поэтому ищем её внутри
+    // строки, а не с начала; и проверяем, что номер доехал головой — агент
+    // пересказывает эту фразу человеку, и звонит человек по ней.
+    let text = crate::bridge::disabled_text(reason.as_deref());
+    assert!(text.contains(&format!("{}: ", crate::bridge::DISABLED_PREFIX)), "{text}");
+    assert!(common::code::split(&text).0.is_some(), "{text}");
 }
 
 /// То же для отказа публикации (находка N2): человек ничего не выключал,

@@ -111,6 +111,13 @@ pub fn note_licence_change_ui(ui: &mut Ui) {
     run_readiness(ui);
 }
 
+/// Метка сборки первой строкой журнала сеанса. Полная форма, а не короткая из
+/// шапки окна: журнал человек присылает файлом, и читать его будут глазами —
+/// хеш здесь стоит ровно столько, сколько он весит.
+pub fn stamp_line() -> Line {
+    Line { kind: Kind::Say, text: format!("1c-connect {}", env!("BUILD_STAMP_FULL")) }
+}
+
 /// Заголовок раздела журнала: название операции и час её начала.
 pub fn head_line(title: &str) -> Line {
     Line { kind: Kind::Head, text: format!("{title} · {}", clock()) }

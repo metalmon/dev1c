@@ -301,7 +301,9 @@ pub fn spawn_full_pass(ui: &Ui, gen: u64, loud: bool) {
                     verify::gather(&ctx, state.as_deref(), ports, Instant::now() + verify::SET_DEADLINE)
                 };
                 if loud {
-                    let text = check::render("1c-connect", env!("CARGO_PKG_VERSION"), &verify::cfg_for_report(&ctx.cfg), &facts);
+                    // Полная метка, а не `CARGO_PKG_VERSION`: отчёт человек
+                    // присылает файлом, и по `0.1.0` сборку не опознать.
+                    let text = check::render("1c-connect", env!("BUILD_STAMP_FULL"), &verify::cfg_for_report(&ctx.cfg), &facts);
                     let _ = write_text(&ctx.kit.state_path("last-check.txt"), &text);
                 }
                 Ev::Ready(gen, facts, loud)

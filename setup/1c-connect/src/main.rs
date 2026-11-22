@@ -19,7 +19,10 @@ use std::sync::Arc;
 #[derive(Parser)]
 #[command(
     name = "1c-connect",
-    version = env!("CARGO_PKG_VERSION"),
+    // Не `CARGO_PKG_VERSION`: у всех сборок он `0.1.0`, и на вопрос «что у вас
+    // стоит» отвечать было нечем. Метка (`build.rs`) различает их по дате,
+    // ветке и хешу.
+    version = env!("BUILD_STAMP_FULL"),
     about = "Подключение машины с 1С к среде разработки",
     disable_help_flag = true,
     disable_version_flag = true,
@@ -274,7 +277,7 @@ fn check(ctx: &Ctx, tunnel_state: Option<&str>) -> Result<()> {
     common::check::print(&checks);
     let (p, f) = common::check::summary(&checks);
     let path = ctx.kit.state_path("last-check.txt");
-    let text = common::check::render("1c-connect", env!("CARGO_PKG_VERSION"), &verify::cfg_for_report(&ctx.cfg), &checks);
+    let text = common::check::render("1c-connect", env!("BUILD_STAMP_FULL"), &verify::cfg_for_report(&ctx.cfg), &checks);
     common::kit::write_text(&path, &text)?;
     println!();
     println!("Пройдено {p}, провалено {f}. Отчёт: {}", path.display());

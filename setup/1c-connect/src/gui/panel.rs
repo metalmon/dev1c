@@ -1179,7 +1179,10 @@ impl Render for Panel {
             .gap_2()
             .h_9()
             .child(img(icon()).size_6())
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("1c-connect"))
+            // Короткая метка сборки — здесь и только здесь: человек на звонке
+            // читает её с экрана вслух, а в строках отказов она была бы
+            // повтором одного и того же на каждой строке.
+            .child(div().font_weight(FontWeight::SEMIBOLD).child(concat!("1c-connect · ", env!("BUILD_STAMP_SHORT"))))
             .child(div().flex_1())
             .child(
                 Button::new("hide")

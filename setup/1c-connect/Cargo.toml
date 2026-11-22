@@ -105,5 +105,12 @@ features = ["blocking", "rustls-tls-native-roots"]
 # (его тянет tokio), прямая зависимость ничего не докачивает.
 libc = "0.2"
 
+[build-dependencies]
+# Формат метки сборки один на все поверхности, и проверяют его тесты
+# `common::code`. Сборочному скрипту нужен тот же код, а не его копия: две
+# копии формата разошлись бы молча. Новых крейтов это не добавляет — `common`
+# и так в дереве сборки.
+common = { path = "../common" }
+
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = { version = "3", optional = true }

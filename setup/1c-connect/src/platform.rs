@@ -90,21 +90,27 @@ fn connect_key(base_path: &str) -> String {
     // портом кластера (`сервер:1541\база`) не находила своей строки в списке —
     // пин версии молча терялся.
     if crate::cfg::is_server_base(p) {
-        if let Some((srv, re)) = p.rsplit_once('\\') {
-            return format!("srv:{}/{}", srv.to_lowercase(), re.to_lowercase());
-        }
+        let (srv, re) = crate::cfg::split_server_base(p);
+        return format!("srv:{}/{}", srv.to_lowercase(), re.to_lowercase());
     }
     format!("file:{}", p.replace('\\', "/").to_lowercase())
 }
 
 /// Значение поля строки подключения: `File="C:\Bases\Buh";`, `Srvr="srv-1c";`,
 /// `Ref="buh";`.
+/// Ищем имя поля ДО знака равенства в каждой части, а не подстрокой во всей
+/// строке: `Srvr="Ref-srv";Ref="buh";` — законная строка, а поиск подстрокой
+/// находил бы `Ref` внутри имени сервера, не видел там `=` и терял базу
+/// целиком — и в списке выбора, и в пине версии.
 fn connect_field(value: &str, name: &str) -> Option<String> {
-    let at = value.find(name)?;
-    let rest = &value[at + name.len()..];
-    let rest = rest.trim_start().strip_prefix('=')?.trim_start();
-    let inner = rest.strip_prefix('"')?;
-    Some(inner[..inner.find('"')?].to_string())
+    value.split(';').find_map(|part| {
+        let (k, v) = part.split_once('=')?;
+        if !k.trim().eq_ignore_ascii_case(name) {
+            return None;
+        }
+        let inner = v.trim_start().strip_prefix('"')?;
+        Some(inner[..inner.find('"')?].to_string())
+    })
 }
 
 /// База из значения `Connect=` строки списка баз — в той самой форме, какую
@@ -163,14 +169,25 @@ pub fn bases_in(v8i: &str) -> Vec<(String, String)> {
 /// пользовательский файл раньше общего). Одна и та же база в двух файлах
 /// показывается один раз: сравниваем тем же ключом, что и пин версии.
 pub fn bases() -> Vec<(String, String)> {
+    let lists = starter_dirs().into_iter().filter_map(|d| read_1c_text(&d.join("ibases.v8i")));
+    dedup(lists.flat_map(|t| bases_in(&t)).collect())
+}
+
+/// Одна и та же база, записанная в двух списках, — одна строка меню. Сравниваем
+/// тем же ключом, что и пин версии (`connect_key`): регистр и вид разделителей
+/// не считаются, потому что один и тот же каталог человек пишет и так, и иначе.
+///
+/// А вот одинаковое ИМЯ при разных строках подключения — это разные базы, и
+/// обе остаются: «Информационная база» 1С даёт по умолчанию, и на машине их
+/// бывает несколько. Различает их путь, который стоит в строке рядом с именем.
+///
+/// Отделена от чтения диска нарочно: иначе проверить её было бы нечем.
+fn dedup(all: Vec<(String, String)>) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
-    for dir in starter_dirs() {
-        let Some(text) = read_1c_text(&dir.join("ibases.v8i")) else { continue };
-        for (name, path) in bases_in(&text) {
-            let key = connect_key(&path);
-            if !out.iter().any(|(_, p)| connect_key(p) == key) {
-                out.push((name, path));
-            }
+    for (name, path) in all {
+        let key = connect_key(&path);
+        if !out.iter().any(|(_, p)| connect_key(p) == key) {
+            out.push((name, path));
         }
     }
     out
@@ -278,8 +295,17 @@ pub fn resolve(cfg: &Cfg, installed: &[(String, PathBuf)], pins: &Pins) -> Resul
 /// Единственное место этого модуля, которое ходит на диск: читает список баз
 /// и оба `1CEStart.cfg` (пользовательский раньше общего).
 pub fn pins_on_disk(cfg: &Cfg) -> Pins {
-    let v8i = starter_dirs().into_iter().map(|d| d.join("ibases.v8i")).find_map(|p| read_1c_text(&p));
-    let base = v8i.as_deref().and_then(|text| base_pin(text, &cfg.host.base_path));
+    // Списков у 1С несколько (обычный лаунчер и учебный, свой и общий), и
+    // база человека лежит в одном из них — не обязательно в первом читаемом.
+    // Прежде брался первый же файл, и пин базы из учебного каталога был
+    // недостижим, пока рядом существовал обычный: мера «учебный лаунчер
+    // смотрят обе оси» была сделана наполовину. Ниже, у `default`, обход
+    // всегда был по всем каталогам — расхождение жило в двух соседних
+    // строках.
+    let base = starter_dirs()
+        .into_iter()
+        .filter_map(|d| read_1c_text(&d.join("ibases.v8i")))
+        .find_map(|t| base_pin(&t, &cfg.host.base_path));
     let default = starter_dirs()
         .into_iter()
         .map(|d| d.join(starter_cfg_name()))
@@ -456,6 +482,40 @@ mod tests {
     fn base_pin_matches_a_server_base_with_a_cluster_port() {
         let v8i = "\u{feff}[Склад]\r\nConnect=Srvr=\"srv-1c:1541\";Ref=\"wh\";\r\nVersion=8.3.27.1508\r\n";
         assert_eq!(base_pin(v8i, "srv-1c:1541\\wh").as_deref(), Some("8.3.27.1508"));
+    }
+
+    /// Два списка сводятся в одно меню: одинаковое имя при разных базах — две
+    /// строки (имя по умолчанию 1С даёт всем), одна и та же база в двух
+    /// списках — одна строка, и остаётся та, что встретилась раньше:
+    /// пользовательский список старше общего.
+    #[test]
+    fn the_same_base_in_two_lists_shows_once_but_a_shared_name_does_not_merge() {
+        let all = vec![
+            ("Информационная база".to_string(), "C:\\Bases\\A".to_string()),
+            ("Информационная база".to_string(), "C:\\Bases\\B".to_string()),
+            ("Она же из общего списка".to_string(), "c:/bases/a/".to_string()),
+            ("Склад".to_string(), "SRV-1C\\wh".to_string()),
+            ("Он же с другой стороны".to_string(), "srv-1c\\WH".to_string()),
+        ];
+        assert_eq!(
+            dedup(all),
+            vec![
+                ("Информационная база".to_string(), "C:\\Bases\\A".to_string()),
+                ("Информационная база".to_string(), "C:\\Bases\\B".to_string()),
+                ("Склад".to_string(), "SRV-1C\\wh".to_string()),
+            ]
+        );
+    }
+
+    /// Имя поля ищется до знака равенства, а не подстрокой: сервер по имени
+    /// `Ref-srv` — законное имя, и прежний поиск терял такую базу целиком.
+    #[test]
+    fn a_server_named_like_a_field_does_not_eat_the_base() {
+        let value = "Srvr=\"Ref-srv\";Ref=\"buh\";";
+        assert_eq!(base_path_of_value(value).as_deref(), Some("Ref-srv\\buh"));
+        // И путь файловой базы, в котором есть слово Srvr, остаётся путём.
+        let value = "File=\"C:\\Bases\\Srvr\";";
+        assert_eq!(base_path_of_value(value).as_deref(), Some("C:\\Bases\\Srvr"));
     }
 
     /// У учебной платформы свой каталог запускателя, и базы в нём — такие же

@@ -85,10 +85,12 @@ pub struct Panel {
     /// не дублирует.
     fit_queued: bool,
     /// Базы из списка 1С (`platform::bases`): имя, как его показывает
-    /// запускатель, и строка базы. Читается один раз, на создании окна: файл
-    /// лежит на диске, а отрисовка идёт десятки раз в секунду. База, заведённая
-    /// в 1С при открытом окне, появится в списке после перезапуска программы —
-    /// ponytail: перечитывать на открытии меню, если это начнут замечать.
+    /// запускатель, и строка базы. Читается на создании окна, а не на
+    /// отрисовке: файл лежит на диске, а отрисовка идёт десятки раз в секунду.
+    /// Это и есть «на каждом показе» — окно гасится по потере фокуса
+    /// (`window::hide_window` зовёт `remove_window`), и новый показ строит
+    /// `Panel` заново. База, заведённая в 1С при открытом окне, появится, как
+    /// только окно закроют и откроют.
     bases: Vec<(String, String)>,
 }
 
@@ -784,8 +786,14 @@ const PATH_IN_MENU: usize = 36;
 /// буквы.
 fn short_path(path: &str, max: usize) -> String {
     let chars: Vec<char> = path.chars().collect();
-    if chars.len() <= max || max < 3 {
+    if chars.len() <= max {
         return path.to_string();
+    }
+    // Под «голова…хвост» нужно хотя бы три знака. Меньше — отдаём ровно
+    // столько, сколько обещали: длина ответа не должна превышать `max` никогда,
+    // иначе этот охранник только выглядит разбором случая.
+    if max < 3 {
+        return chars[..max].iter().collect();
     }
     // Хвост длиннее головы: имя базы важнее начала пути.
     let keep = max - 1;
@@ -1284,10 +1292,13 @@ impl Render for Panel {
         // файловой базы, которой в списке 1С нет.
         let bases = self.bases.clone();
         let pick_base = |target: Entity<InputState>, _cx: &mut Context<Self>| {
-            let (_, tooltip) = pick_face();
+            // Лицо кнопки — общее (`pick_face`): решение «подпись или значок»
+            // живёт в одном месте, и вернуть подпись можно, не трогая кнопки.
+            let (label, tooltip) = pick_face();
             let folder = target.clone();
             Button::new("pick-base")
                 .outline()
+                .when_some(label, |b, l| b.label(l))
                 .icon(Icon::default().data(FOLDER_SVG))
                 .tooltip(tooltip)
                 .dropdown_menu(move |menu, _, _| {
@@ -1312,7 +1323,12 @@ impl Render for Panel {
                             target.update(cx, |s, cx| s.set_value(text, window, cx));
                         }));
                     }
-                    if !bases.is_empty() {
+                    // Пустой список — не молчание: человеку обещали базы 1С, и
+                    // он должен узнать, что их нет, а не гадать, сломалась ли
+                    // кнопка.
+                    if bases.is_empty() {
+                        menu = menu.label("У 1С на этой машине баз не записано");
+                    } else {
                         menu = menu.separator();
                     }
                     let folder = folder.clone();
@@ -1776,6 +1792,12 @@ mod tests {
         // Резать по байтам кириллицу нельзя — проверка на то, что строка цела.
         let cyr = "C:\\1cbase\\ТЕСТ УНФ проф\\очень длинное имя базы";
         assert_eq!(short_path(cyr, 20).chars().count(), 20);
+
+        // Обещанной длины не превышаем никогда, даже когда многоточию негде
+        // стоять.
+        for max in 0..4 {
+            assert!(short_path(long, max).chars().count() <= max, "{max}");
+        }
     }
 
     /// Задача 7: вкладка показывает тот же набор и ничего своего — ни отбора,

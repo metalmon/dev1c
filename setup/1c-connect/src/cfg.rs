@@ -154,6 +154,20 @@ pub fn is_server_base(base_path: &str) -> bool {
     !drive && !head.is_empty()
 }
 
+/// Кластер и имя базы из клиент-серверной строки: `srv-1c:1541\buh` →
+/// `("srv-1c:1541", "buh")`. Зовут её все, кому нужна эта пара — дескриптор
+/// публикации (`publication::ib_connection` — `Srvr`/`Ref`) и ключ сравнения с
+/// `ibases.v8i` (`platform::connect_key`), — и правило у них одно, как и у
+/// самого вопроса «серверная ли это база» (`is_server_base`). Прежде пара
+/// разбиралась в каждом месте своим способом, и способы расходились: один брал
+/// первый обратный слэш, другой последний.
+///
+/// Первый, а не последний: имя кластера слэшей не содержит, а всё, что за ним,
+/// — имя базы целиком.
+pub fn split_server_base(base_path: &str) -> (&str, &str) {
+    base_path.split_once('\\').unwrap_or((base_path, ""))
+}
+
 /// Номер рабочего места: `dev1`, `dev2` или `dev3`. От него считаются порты.
 pub fn number_of(workstation: &str) -> Option<u16> {
     workstation.strip_prefix("dev")?.parse::<u16>().ok().filter(|n| (1..=3).contains(n))

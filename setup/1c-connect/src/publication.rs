@@ -53,7 +53,7 @@ fn xml_escape(s: &str) -> String {
 fn ib_connection(cfg: &Cfg) -> String {
     let base = &cfg.host.base_path;
     if crate::cfg::is_server_base(base) {
-        let (srvr, rf) = base.split_once('\\').unwrap_or((base.as_str(), ""));
+        let (srvr, rf) = crate::cfg::split_server_base(base);
         return format!("Srvr=&quot;{}&quot;;Ref=&quot;{}&quot;;", xml_escape(srvr), xml_escape(rf));
     }
     format!("File=&quot;{}&quot;;", xml_escape(base))

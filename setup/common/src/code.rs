@@ -312,7 +312,6 @@ mod tests {
         "1c-connect/src/session.rs",
         "1c-connect/src/single_instance.rs",
         "1c-connect/src/tunnel.rs",
-        "1c-connect/src/verify.rs",
     ];
 
     /// Корень мастерской: рядом с `common` лежат остальные крейты.

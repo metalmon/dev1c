@@ -100,7 +100,7 @@ pub fn order(mode: &str) -> Vec<&'static str> {
 pub fn licence_fact(state: &crate::licence::State) -> Check {
     let until = crate::licence::until_text();
     match state {
-        crate::licence::State::Expired => Check::fail(DEADLINE, format!("истёк {until}"), crate::licence::REFUSAL),
+        crate::licence::State::Expired => Check::fail_code(1501, DEADLINE, format!("истёк {until}"), crate::licence::REFUSAL),
         crate::licence::State::Soon { days } => Check::note(DEADLINE, format!("до {until} — осталось дней: {days}")),
         crate::licence::State::Valid => Check::pass(DEADLINE, format!("до {until}")),
     }
@@ -136,7 +136,8 @@ pub fn analyzer_fact(ours: Option<&str>, want: &[(&'static str, String)], have: 
     };
     if let Some(target) = got(TARGET) {
         if target != ours {
-            return Check::fail(
+            return Check::fail_code(
+                1502,
                 ANALYZER,
                 format!("{TARGET} = {target}, а платформа этой машины {ours}"),
                 format!(
@@ -174,7 +175,7 @@ pub fn analyzer_fact(ours: Option<&str>, want: &[(&'static str, String)], have: 
 /// же становится причиной холодного замка.
 pub fn platform_fact(choice: &Result<crate::platform::Choice, String>, others: &[String]) -> Check {
     match choice {
-        Err(e) => Check::fail(PLATFORM, e.clone(), "установите нужную версию платформы 1С или исправьте platform в 1c-connect.toml"),
+        Err(e) => Check::fail_code(1503, PLATFORM, e.clone(), "установите нужную версию платформы 1С или исправьте platform в 1c-connect.toml"),
         Ok(c) => {
             let mut detail = format!("{} ({}) — {}", c.version, c.exe.display(), c.why);
             if !others.is_empty() {
@@ -191,7 +192,7 @@ pub fn platform_fact(choice: &Result<crate::platform::Choice, String>, others: &
 /// поле: когда адрес есть, отчёт показывает его сам — `gitea_fact` называет
 /// адрес в любом исходе.
 pub fn gitea_address_fact() -> Check {
-    Check::fail(GITEA, crate::cfg::NO_GITEA, crate::cfg::NO_GITEA_FIX)
+    Check::fail_code(1504, GITEA, crate::cfg::NO_GITEA, crate::cfg::NO_GITEA_FIX)
 }
 
 /// Адрес называется в каждом исходе: отчёт показывает, с чем программа
@@ -199,9 +200,10 @@ pub fn gitea_address_fact() -> Check {
 pub fn gitea_fact(g: &Gitea, url: &str) -> Check {
     match g {
         Gitea::Down(e) => {
-            Check::fail(GITEA, format!("{url} не отвечает: {e}"), "среда не поднята или адрес не тот — dev1c-setup check на сервере")
+            Check::fail_code(1505, GITEA, format!("{url} не отвечает: {e}"), "среда не поднята или адрес не тот — dev1c-setup check на сервере")
         }
-        Gitea::NoOrg => Check::fail(
+        Gitea::NoOrg => Check::fail_code(
+            1506,
             GITEA,
             format!("{url} отвечает, но организации dev1c в среде нет"),
             "образ среды старый — dev1c-setup install с новым комплектом",
@@ -233,7 +235,7 @@ pub fn display_fact(display: Option<&str>, alive: bool, xvfb: Option<&std::path:
     };
     match xvfb {
         Some(p) => Check::pass(DISPLAY, format!("{why}; экран даёт {} (виртуальный, никто в него не смотрит)", p.display())),
-        None => Check::fail(DISPLAY, why, crate::ops_host::SCREEN_HINT),
+        None => Check::fail_code(1507, DISPLAY, why, crate::ops_host::SCREEN_HINT),
     }
 }
 
@@ -248,7 +250,8 @@ pub fn configurator_fact(n: usize) -> Check {
         Check {
             ok: true,
             info: true,
-            ..Check::fail(
+            ..Check::fail_code(
+                1508,
                 CONFIGURATOR,
                 format!("запущено процессов 1cv8: {n}"),
                 "закройте Конфигуратор и клиентов 1С перед загрузкой: cf_load и import откажут, пока он открыт",
@@ -346,7 +349,8 @@ pub fn workstation_ports_fact(mcp: u16, vrunner: u16, busy: &[(u16, String)], po
         } else {
             format!(": {}", busy.iter().map(|(_, w)| w.as_str()).collect::<Vec<_>>().join(", "))
         };
-        return Check::fail(
+        return Check::fail_code(
+            1509,
             WORKSTATION_PORTS,
             format!("{mcp} и {vrunner}: занять не вышло{who} — агент до нас не дойдёт"),
             "закройте второй коннектор этого рабочего места (или выключите MCP на той машине) и включите снова",
@@ -367,7 +371,8 @@ pub fn workstation_ports_fact(mcp: u16, vrunner: u16, busy: &[(u16, String)], po
         PortUse::WeListen => {
             let mut who: Vec<&str> = busy.iter().map(|(_, w)| w.as_str()).collect();
             who.dedup();
-            Check::fail(
+            Check::fail_code(
+                1510,
                 WORKSTATION_PORTS,
                 format!("порт(ы) {} заняты: {}", busy.iter().map(|(p, _)| p.to_string()).collect::<Vec<_>>().join(", "), who.join(", ")),
                 format!("закройте {} и включите MCP снова", who.join(" и ")),
@@ -427,7 +432,7 @@ pub fn base_fact(path: &str, exists: bool) -> Check {
     if crate::cfg::is_server_base(path) || exists {
         Check::pass(BASE, path.to_string())
     } else {
-        Check::fail(BASE, format!("каталога {path} нет"), "base_path в 1c-connect.toml")
+        Check::fail_code(1511, BASE, format!("каталога {path} нет"), "base_path в 1c-connect.toml")
     }
 }
 
@@ -441,8 +446,8 @@ pub fn tools_fact(kit_root: &std::path::Path) -> Check {
         // `Missing` («в профиле ничего нет») и `Drifted` («на машине одна
         // версия, в комплекте другая»). Остаётся одно — чего-то нет в самом
         // комплекте, и лечится это только целым комплектом.
-        OpState::Missing | OpState::Drifted { .. } => Check::fail(TOOLS, "комплект неполный", "скопируйте полный комплект заново"),
-        OpState::Blocked(d) => Check::fail(TOOLS, d, "скопируйте полный комплект заново"),
+        OpState::Missing | OpState::Drifted { .. } => Check::fail_code(1512, TOOLS, "комплект неполный", "скопируйте полный комплект заново"),
+        OpState::Blocked(d) => Check::fail_code(1513, TOOLS, d, "скопируйте полный комплект заново"),
     }
 }
 
@@ -459,7 +464,7 @@ pub fn db_user_fact(user: &str) -> Check {
     if db_user_is_set(user) {
         Check::pass(DB_USER, user.to_string())
     } else {
-        Check::fail(DB_USER, "не задан", "заполните поле «Пользователь базы» и нажмите «Сохранить»")
+        Check::fail_code(1514, DB_USER, "не задан", "заполните поле «Пользователь базы» и нажмите «Сохранить»")
     }
 }
 
@@ -484,14 +489,16 @@ pub fn db_user_is_set(user: &str) -> bool {
 /// те же, которыми пользуется сама публикация), сюда приходит результат.
 pub fn web_server_fact(apache: Option<&std::path::Path>, module: Option<&std::path::Path>) -> Check {
     let Some(apache) = apache else {
-        return Check::fail(
+        return Check::fail_code(
+            1515,
             SYSTEM_WEB,
             "apache2 не найден ни в $PATH, ни в системных каталогах служб",
             "установите пакет apache2 — под Linux базу публикует веб-сервер системы, своего в комплекте нет",
         );
     };
     let Some(module) = module else {
-        return Check::fail(
+        return Check::fail_code(
+            1516,
             SYSTEM_WEB,
             format!("{} есть, но рядом с платформой нет модуля 1С (wsap24.so/wsap24t.so)", apache.display()),
             "переустановите платформу 1С с компонентом «Модули расширения веб-сервера»",
@@ -544,7 +551,7 @@ pub fn web_fact(port: u16, up: bool, own: bool) -> Check {
     if up {
         Check::pass(WEB, format!("порт {port} отвечает"))
     } else {
-        Check::fail(WEB, format!("порт {port} не отвечает"), web_hint(own, cfg!(windows)))
+        Check::fail_code(1517, WEB, format!("порт {port} не отвечает"), web_hint(own, cfg!(windows)))
     }
 }
 
@@ -591,15 +598,15 @@ fn publication_responds_fact(base_url: &str, responds: bool, busy: Option<(&str,
         // Important 5 (повторное ревью): пробы не было вовсе — «не отвечает»
         // утверждало бы то, что не проверялось. `extension_fact` в этом
         // случае честно говорит «не спрашивали», и здесь то же самое.
-        return Check::busy(PUBLICATION, format!("{base_url}/version не спрашивали: на машине {reason}"), hint);
+        return Check::busy_code(1518, PUBLICATION, format!("{base_url}/version не спрашивали: на машине {reason}"), hint);
     }
     // Пустой адрес — не «не отвечает», а «не задан»: стучать было некуда, и
     // пробы не было. Это состояние чинится одним полем в окне, и назвать его
     // надо так, чтобы человек пошёл туда, а не искать упавший веб-сервер.
     if base_url.trim().is_empty() {
-        return Check::fail(PUBLICATION, "адрес публикации не задан".to_string(), PUBLICATION_ADDRESS_HINT);
+        return Check::fail_code(1519, PUBLICATION, "адрес публикации не задан".to_string(), PUBLICATION_ADDRESS_HINT);
     }
-    Check::fail(PUBLICATION, format!("{base_url}/version не отвечает"), UNREACHED_HINT)
+    Check::fail_code(1520, PUBLICATION, format!("{base_url}/version не отвечает"), UNREACHED_HINT)
 }
 
 /// Расширение в базе — версия, отсутствие или недостижимость (`ops_host::Reach`,
@@ -620,7 +627,7 @@ fn publication_responds_fact(base_url: &str, responds: bool, busy: Option<(&str,
 /// пока занятость от нашей же долгой операции.
 fn extension_fact(reach: Option<&Reach>, busy: Option<(&str, &str)>, publication: &str) -> Check {
     if let Some((reason, hint)) = busy {
-        return Check::busy(EXTENSION, format!("не спрашивали: на машине {reason}"), hint);
+        return Check::busy_code(1521, EXTENSION, format!("не спрашивали: на машине {reason}"), hint);
     }
     let foreign = publication == "webserver";
     match reach {
@@ -631,19 +638,21 @@ fn extension_fact(reach: Option<&Reach>, busy: Option<(&str, &str)>, publication
         // галочкой, снятой по умолчанию (замер 27.10 на диалоге 8.5): там
         // 404 отдаёт **установленное** расширение, и посылать человека
         // ставить его заново — посылать чинить то, что не сломано.
-        Some(Reach::Absent) if foreign => Check::fail(
+        Some(Reach::Absent) if foreign => Check::fail_code(
+            1522,
             EXTENSION,
             "расширение в базе есть, но его HTTP-сервис не опубликован",
             "Конфигуратор → Публикация на веб-сервере → вкладка «HTTP-сервисы» → галочка «Публиковать HTTP-сервисы расширений по умолчанию». Перезапускать веб-сервер не нужно",
         ),
-        Some(Reach::Absent) => Check::fail(EXTENSION, "расширения в базе нет", PUBLICATION_HINT),
+        Some(Reach::Absent) => Check::fail_code(1523, EXTENSION, "расширения в базе нет", PUBLICATION_HINT),
         // Занятость в чужой публикации — ожидаемое состояние, а не поломка:
         // сеанс держит пул её веб-сервера, а сеансовыми настройками нашего
         // сервиса оттуда не управляет никто (у сервисов расширений нет своей
         // строки ни в дескрипторе, ни в диалоге). Поэтому к совету платформы
         // добавляем их родной способ — перезапуск платформы. Сами не
         // перезапускаем ничего: ни их веб-сервер, ни платформу.
-        Some(Reach::Refused(c)) if foreign && crate::onec_error::is_busy(c) => Check::busy(
+        Some(Reach::Refused(c)) if foreign && crate::onec_error::is_busy(c) => Check::busy_code(
+            1524,
             EXTENSION,
             c.what,
             format!("база занята сеансом агента — это ожидаемо, когда публикует ваш веб-сервер: {}, либо перезапуск платформы", c.fix),
@@ -652,21 +661,21 @@ fn extension_fact(reach: Option<&Reach>, busy: Option<(&str, &str)>, publication
         // Совет не про установку расширения, а про пароль: ровно сценарий
         // «сменили пароль базы, публикацию не обновили».
         Some(Reach::Denied(why)) => {
-            Check::fail(EXTENSION, why.clone(), "база не пустила — проверьте db_password в параметрах и обновите публикацию")
+            Check::fail_code(1525, EXTENSION, why.clone(), "база не пустила — проверьте db_password в параметрах и обновите публикацию")
         }
         // База ответила отказом и назвала причину сама (`onec_error`). Занято
         // это или сломано — решает она же: ограничение по числу сеансов это
         // «подожди», всё прочее «починяй». Слова и совет — её, не наши
         // (решение владельца 26.10: занятость устанавливает база своим
         // ответом, а не мы догадкой по списку процессов).
-        Some(Reach::Refused(c)) if crate::onec_error::is_busy(c) => Check::busy(EXTENSION, c.what, c.fix),
-        Some(Reach::Refused(c)) => Check::fail(EXTENSION, c.what, c.fix),
-        Some(Reach::Unreachable(why)) => Check::fail(EXTENSION, why.clone(), UNREACHED_HINT),
+        Some(Reach::Refused(c)) if crate::onec_error::is_busy(c) => Check::busy_code(1526, EXTENSION, c.what, c.fix),
+        Some(Reach::Refused(c)) => Check::fail_code(1527, EXTENSION, c.what, c.fix),
+        Some(Reach::Unreachable(why)) => Check::fail_code(1528, EXTENSION, why.clone(), UNREACHED_HINT),
         // Пробы не было и не могло быть: адрес чужой публикации не задан,
         // стучать некуда. Говорим это, а не «расширения в базе нет» — база
         // тут ни при чём, и чинится это полем в окне (`gather` сюда и
         // приходит, не сходив к базе).
-        None => Check::fail(EXTENSION, "не спрашивали: адрес публикации не задан", PUBLICATION_ADDRESS_HINT),
+        None => Check::fail_code(1529, EXTENSION, "не спрашивали: адрес публикации не задан", PUBLICATION_ADDRESS_HINT),
     }
 }
 
@@ -716,7 +725,8 @@ enum Descriptor {
 fn descriptor_fact(d: Descriptor) -> Check {
     match d {
         Descriptor::Matches => Check::pass(DESCRIPTOR, "совпадает с текущим паролем базы"),
-        Descriptor::Differs => Check::fail(
+        Descriptor::Differs => Check::fail_code(
+            1530,
             DESCRIPTOR,
             "дескриптор публикации разошёлся с текущим паролем базы",
             "1c-connect install — перепишет default.vrd текущим паролем",
@@ -810,12 +820,12 @@ fn project_fact(ctx: &Ctx, tools: &std::path::Path) -> Check {
     let p = crate::project::Project::from_cfg(&ctx.cfg, tools);
     match crate::project::layout_state(&p) {
         Layout::Ok => Check::pass(PROJECT, format!("{}, ветка {}", p.dir.display(), p.branch)),
-        Layout::Missing => Check::fail(PROJECT, format!("{} не разложен", p.dir.display()), "1c-connect install (host.project)"),
+        Layout::Missing => Check::fail_code(1531, PROJECT, format!("{} не разложен", p.dir.display()), "1c-connect install (host.project)"),
         Layout::BaseDir(f) => {
-            Check::fail(PROJECT, format!("{} — каталог базы ({f})", p.dir.display()), "project в 1c-connect.toml — другой каталог")
+            Check::fail_code(1532, PROJECT, format!("{} — каталог базы ({f})", p.dir.display()), "project в 1c-connect.toml — другой каталог")
         }
-        Layout::Drifted(d) => Check::fail(PROJECT, d, "1c-connect install — поправит ветку, origin и файлы"),
-        Layout::NoGitea => Check::fail(PROJECT, crate::cfg::NO_GITEA, crate::cfg::NO_GITEA_FIX),
+        Layout::Drifted(d) => Check::fail_code(1533, PROJECT, d, "1c-connect install — поправит ветку, origin и файлы"),
+        Layout::NoGitea => Check::fail_code(1534, PROJECT, crate::cfg::NO_GITEA, crate::cfg::NO_GITEA_FIX),
     }
 }
 
@@ -825,7 +835,7 @@ pub fn params_fact(file_exists: bool, server: &str) -> Check {
     if file_exists {
         Check::pass(PARAMS, format!("среда {server}"))
     } else {
-        Check::fail(PARAMS, "1c-connect.toml нет в комплекте", "1c-connect example > 1c-connect.toml, затем впишите свои значения")
+        Check::fail_code(1535, PARAMS, "1c-connect.toml нет в комплекте", "1c-connect example > 1c-connect.toml, затем впишите свои значения")
     }
 }
 
@@ -951,7 +961,7 @@ pub fn cheap(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, sessions: us
         if exe.exists() {
             Check::pass(KIT, exe.file_name().unwrap_or_default().to_string_lossy().to_string())
         } else {
-            Check::fail(KIT, "файла нет", "комплект неполный — скопируйте заново")
+            Check::fail_code(1536, KIT, "файла нет", "комплект неполный — скопируйте заново")
         }
     });
     let tools = ctx.kit.root.clone();
@@ -960,7 +970,7 @@ pub fn cheap(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, sessions: us
     let tools_ok = tf.ok;
     v.push(tf);
     v.push(if !tools_ok {
-        Check::fail(VRUNNER, "инструментов на машине нет", "1c-connect install")
+        Check::fail_code(1537, VRUNNER, "инструментов на машине нет", "1c-connect install")
     } else {
         // Только знание, которое уже есть (занятость мьютекса проекта или
         // отметка моста, что раннер отвечал агенту): спека прямо запрещает
@@ -2018,6 +2028,15 @@ mod tests {
         assert!(c.ok && c.info && c.detail.contains("одна на двоих"), "{}", c.detail);
         assert!(!base_fact("C:\\Bases\\Buh", false).ok);
         assert!(base_fact("srv\\Buh", false).ok, "a server base is not a directory to look for");
+    }
+
+    /// Область 15 (задача 3): у каждого провалившегося факта свой номер, и
+    /// два разных факта не делят один и тот же номер.
+    #[test]
+    fn every_failing_fact_carries_its_own_number() {
+        let c = base_fact("C:\\Bases\\Нет", false);
+        assert!(!c.ok && c.code / 100 == 15, "{c:?}");
+        assert_ne!(base_fact("C:\\Bases\\Нет", false).code, db_user_fact("  ").code);
     }
 
     #[test]

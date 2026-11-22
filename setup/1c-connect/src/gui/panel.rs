@@ -248,8 +248,21 @@ pub fn switch_locked(gate: Option<&str>, on: bool, has_progress: bool) -> bool {
 /// подвал и журнал. «Нельзя включить», а не «включать нечего»: включать как
 /// раз есть что, просто не на чем — поле не заполнено, платформы нет. Прежняя
 /// формулировка говорила человеку, что его работа никому не нужна.
+///
+/// Номер — впереди ВСЕЙ фразы, а не внутри неё: `gate::cold_gate` отдаёт
+/// `«1514 · не задан пользователь базы»`, и склеить приставку перед номером
+/// («Нельзя включить: 1514 · …») значило бы спрятать его там, где человек не
+/// читает вслух первым — а `common::code::split` на такой строке честно
+/// отдал бы `None`, то есть по собственному определению крейта это строка
+/// без номера. Поэтому номер сперва вынимается (`code::split`), а приставка
+/// садится за ним, перед остатком фразы. Платформенный отказ номера пока не
+/// несёт (задача 6) — `split` отдаёт `None`, и строка остаётся прежней.
 pub fn gate_text(why: &str) -> String {
-    format!("Нельзя включить: {why}")
+    let (code, rest) = common::code::split(why);
+    match code {
+        Some(code) => common::code::say(code, format!("Нельзя включить: {rest}")),
+        None => format!("Нельзя включить: {why}"),
+    }
 }
 
 /// Подсказка переключателя. Замок — первым, даже когда есть отказ связи:
@@ -1760,9 +1773,9 @@ impl Render for Panel {
 #[cfg(test)]
 mod tests {
     use super::{
-        adopt_needed, can_save, card, fact_rows, fields_differ, foot_left_text, op_question, pick_face, project_facts, project_menu,
-        project_rows, reason, save_hint, short_path, shown_base_url, shown_fields, switch_locked, switch_tooltip, window_radius,
-        ProjectMenu, FOOT_LINE, FOOT_LINES, PATH_IN_MENU,
+        adopt_needed, can_save, card, fact_rows, fields_differ, foot_left_text, gate_text, op_question, pick_face, project_facts,
+        project_menu, project_rows, reason, save_hint, short_path, shown_base_url, shown_fields, switch_locked, switch_tooltip,
+        window_radius, ProjectMenu, FOOT_LINE, FOOT_LINES, PATH_IN_MENU,
     };
     use crate::cfg::Host;
     use crate::gui::{Dot, Kind, Line, ProjectView, Running, Verdict, Which};
@@ -2434,12 +2447,29 @@ mod tests {
     /// строками с многоточием (`FOOT_LINES`, `line_clamp`): в конце строки он
     /// уезжал бы под обрез ровно на самых длинных причинах — то есть тогда,
     /// когда он нужнее всего. Самая длинная причина ворот — про инструменты
-    /// комплекта (`gate::cold_gate`).
+    /// комплекта (`gate::cold_gate`), настоящая, не выдуманная тестом: взята у
+    /// самого `cold_gate`, иначе номер и текст легко расходятся (находка
+    /// ревью: было 1207 у текста с настоящим номером 1202).
+    ///
+    /// Проходит ровно той дорогой, какой причина идёт до подвала живого окна
+    /// (`panel::reason` → `gate_text`), а не мимо неё: до починки `gate_text`
+    /// (номер оказывался внутри фразы, после «Нельзя включить: ») этот тест
+    /// обязан падать.
     #[test]
     fn the_number_survives_the_two_line_clamp() {
-        let longest = "инструментов в комплекте нет (vrunner/, git/, httpd/) — скопируйте полный комплект заново";
-        let (text, _) = foot_left_text(None, Some(&common::code::say(1207, longest)), None, "C:\\kit");
-        assert!(text.starts_with("1207 · "), "{text}");
+        let c = crate::cfg::filled_for_test();
+        let why = crate::gate::cold_gate(
+            &c,
+            true,
+            true,
+            &common::op::OpState::Missing,
+            Ok(std::path::Path::new("1cv8.exe")),
+            true,
+            &crate::licence::State::Valid,
+        )
+        .expect("незаполненный комплект обязан запереть переключатель");
+        let (text, _) = foot_left_text(None, Some(&gate_text(&why)), None, "C:\\kit");
+        assert!(text.starts_with("1202 · Нельзя включить: "), "{text}");
     }
 
     /// Подвал резервирует две строки всегда: блок ровно в высоту кнопки

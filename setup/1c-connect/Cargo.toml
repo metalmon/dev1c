@@ -143,10 +143,12 @@ raw-window-handle = { version = "0.6", optional = true }
 # Win32_System_StationsAndDesktops — ради GetProcessWindowStation +
 # GetUserObjectInformationW (holder::place_for_a_window): есть ли на машине
 # место, где показать окно. Спрашивается ДО всякого блокирующего вызова.
-# Фича не за `gui` потому, что здесь вообще нет фич за `gui`: этот раздел
-# целиком про Windows, а не про окно, и живёт в нём факт ОС, а не
-# принадлежность окна (закон 8 спеки — см. докстроку функции). Прежний довод
-# «спрашивается и сборкой без окна» был ложью, снят 22.11.
+# Фича не за `gui` потому, что за `gui` стоит ПРИНАДЛЕЖНОСТЬ окна, а это факт
+# ОС (закон 8 спеки — весь довод в докстроке функции). Соседу по разделу,
+# raw-window-handle, за `gui` стоять как раз правильно: он про HWND окна.
+# Про доводы в этом месте: 17.11 здесь стояло «спрашивается и сборкой без
+# окна» (ложь — единственный зовущий за фичей `gui`), 22.11 — «здесь вообще
+# нет фич за `gui`» (ложь — см. raw-window-handle, строка 130, тот же раздел).
 # Флаг WSF_VISIBLE лежит в уже взятой Win32_UI_WindowsAndMessaging.
 windows-sys ={ version = "0.60", features = ["Win32_Foundation", "Win32_System_StationsAndDesktops", "Win32_UI_WindowsAndMessaging", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Storage_FileSystem", "Win32_UI_HiDpi", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_System_LibraryLoader", "Win32_System_SystemInformation", "Win32_System_Registry", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_System_Pipes", "Win32_System_RemoteDesktop"] }
 

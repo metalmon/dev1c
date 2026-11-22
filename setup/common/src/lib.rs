@@ -6,6 +6,7 @@
 //! CLI печатает их в терминал, окно — рисует в списке шагов.
 
 pub mod check;
+pub mod code;
 pub mod console;
 pub mod docker;
 #[cfg(feature = "gui")]

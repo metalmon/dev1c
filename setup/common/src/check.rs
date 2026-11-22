@@ -13,6 +13,14 @@ pub struct Check {
     pub busy: bool,
     pub detail: String,
     pub hint: String,
+    /// Номер отказа, который человек диктует по телефону. Ноль — номера нет:
+    /// поле необязательное нарочно, чтобы `dev1c-setup` со своими девятнадцатью
+    /// фактами собирался без единой правки и получил номера тогда, когда о нём
+    /// начнут звонить.
+    ///
+    /// Номер — поле, а не часть текста: отчёт печатает его сам, а втиснутый в
+    /// середину фразы его потом пришлось бы выковыривать разбором.
+    pub code: u16,
 }
 
 /// Итог факта — выведен из его полей, а не хранится рядом: два источника
@@ -26,20 +34,33 @@ pub enum Outcome {
 
 impl Check {
     pub fn pass(what: &str, detail: impl Into<String>) -> Self {
-        Self { what: what.into(), ok: true, info: false, busy: false, detail: detail.into(), hint: String::new() }
+        Self { what: what.into(), ok: true, info: false, busy: false, detail: detail.into(), hint: String::new(), code: 0 }
     }
     pub fn fail(what: &str, detail: impl Into<String>, hint: impl Into<String>) -> Self {
-        Self { what: what.into(), ok: false, info: false, busy: false, detail: detail.into(), hint: hint.into() }
+        Self { what: what.into(), ok: false, info: false, busy: false, detail: detail.into(), hint: hint.into(), code: 0 }
     }
     pub fn note(what: &str, detail: impl Into<String>) -> Self {
-        Self { what: what.into(), ok: true, info: true, busy: false, detail: detail.into(), hint: String::new() }
+        Self { what: what.into(), ok: true, info: true, busy: false, detail: detail.into(), hint: String::new(), code: 0 }
     }
     /// Занято: факт проверен, но решить его сейчас нельзя — кто-то другой
     /// держит базу. `ok` и `info` оба `true`, чтобы `summary()` не считал его
     /// ни пройденным (`ok && !info` ложно из-за `info`), ни проваленным
     /// (`!ok` ложно) — без изменений в самой формуле.
     pub fn busy(what: &str, detail: impl Into<String>, hint: impl Into<String>) -> Self {
-        Self { what: what.into(), ok: true, info: true, busy: true, detail: detail.into(), hint: hint.into() }
+        Self { what: what.into(), ok: true, info: true, busy: true, detail: detail.into(), hint: hint.into(), code: 0 }
+    }
+
+    /// Проваленный факт с номером. Построен на `fail`, а не своим литералом:
+    /// два похожих конструктора разошлись бы молча — та же болезнь, от которой
+    /// `outcome()` выведен из полей.
+    pub fn fail_code(code: u16, what: &str, detail: impl Into<String>, hint: impl Into<String>) -> Self {
+        Self { code, ..Self::fail(what, detail, hint) }
+    }
+
+    /// Занятый факт с номером. Жёлтая строка номер несёт: «занято» — это «не
+    /// сделалось», и звонят про него так же, как про провал.
+    pub fn busy_code(code: u16, what: &str, detail: impl Into<String>, hint: impl Into<String>) -> Self {
+        Self { code, ..Self::busy(what, detail, hint) }
     }
 
     pub fn outcome(&self) -> Outcome {
@@ -78,7 +99,13 @@ fn line(i: usize, c: &Check) -> String {
         Outcome::Good => " ok ",
         Outcome::Bad => "FAIL",
     };
-    let mut s = format!("{:>2}. [{mark}] {}: {}\n", i + 1, c.what, c.detail);
+    // Номер — через `code::say`, а не своим форматом: человек диктует одно и
+    // то же, прочёл он подвал окна, журнал или этот отчёт. Ноль значит «номера
+    // нет», и зелёная строка остаётся без него — на успехе он шум, который
+    // учит не обращать на номера внимания.
+    let body = format!("{}: {}", c.what, c.detail);
+    let body = if c.code == 0 { body } else { crate::code::say(c.code, body) };
+    let mut s = format!("{:>2}. [{mark}] {body}\n", i + 1);
     if !c.hint.is_empty() {
         s.push_str(&format!("          → {}\n", c.hint));
     }
@@ -121,6 +148,30 @@ mod tests {
         assert!(text.contains(" 2. [info] туннель dev1: не поднят"), "{text}");
         assert!(text.contains("→ dev1c-setup status"));
         assert!(text.ends_with("Пройдено 1, провалено 1.\n"));
+    }
+
+    #[test]
+    fn only_the_coded_constructors_carry_a_number() {
+        assert_eq!(Check::fail_code(1501, "база", "нет каталога", "base_path").code, 1501);
+        assert_eq!(Check::busy_code(1502, "база", "занята", "закройте 1С").code, 1502);
+        assert_eq!(Check::fail("база", "нет каталога", "base_path").code, 0);
+        assert_eq!(Check::pass("база", "C:\\Bases\\Buh").code, 0);
+
+        // Номер стоит перед именем факта, и только когда он есть: зелёная
+        // строка его не несёт.
+        let text = render(
+            "1c-connect",
+            "0.1.0",
+            "",
+            &[
+                Check::fail_code(1501, "база", "нет каталога", "base_path"),
+                Check::busy_code(1502, "база", "занята", "закройте 1С"),
+                Check::pass("движок", "docker 28"),
+            ],
+        );
+        assert!(text.contains(" 1. [FAIL] 1501 · база: нет каталога"), "{text}");
+        assert!(text.contains(" 2. [busy] 1502 · база: занята"), "{text}");
+        assert!(text.contains(" 3. [ ok ] движок: docker 28"), "{text}");
     }
 
     #[test]

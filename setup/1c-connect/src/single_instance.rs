@@ -269,7 +269,16 @@ pub fn parse_proc_locks(out: &str, dev: u64, ino: u64) -> bool {
         }
         let mut id = f[5].split(':');
         let (Some(maj), Some(min), Some(inode)) = (id.next(), id.next(), id.next()) else { return false };
-        let (Ok(maj), Ok(min), Ok(inode)) = (maj.parse::<u32>(), min.parse::<u32>(), inode.parse::<u64>()) else { return false };
+        // Устройство ядро печатает ШЕСТНАДЦАТЕРИЧНЫМ (`fs/locks.c`: `%02x:%02x:%lu`), а
+        // inode — десятичным. Разбор по основанию 10 сходился только там, где все цифры
+        // не больше девяти: пример из строки выше (`08:01`) как раз такой, и тест на нём
+        // был зелёным. Замер в контейнере 23.11: `stat` даёт устройство 0:51, замок в
+        // `/proc/locks` записан как `00:33` — по основанию 10 это 0:33, совпадения нет, и
+        // живой владелец читался как ушедший. Тогда гаснет разрешение на работу агентам
+        // (`allow::read`), хотя окно включено.
+        let (Ok(maj), Ok(min), Ok(inode)) = (u32::from_str_radix(maj, 16), u32::from_str_radix(min, 16), inode.parse::<u64>()) else {
+            return false;
+        };
         libc::makedev(maj, min) as u64 == dev && inode == ino
     })
 }
@@ -555,6 +564,23 @@ mod tests {
         assert!(!parse_proc_locks(line, libc::makedev(8, 2) as u64, 7092817), "другое устройство — не держат");
         assert!(!parse_proc_locks("1: FLOCK ADVISORY READ 2206 08:01:7092817 0 EOF\n", dev, 7092817), "READ — не наш LOCK_EX");
         assert!(!parse_proc_locks("", dev, 7092817));
+    }
+
+    /// Устройство в `/proc/locks` — шестнадцатеричное, и пример `08:01` этого не
+    /// показывает: там обе цифры меньше десяти, и разбор по основанию 10 сходился
+    /// случайно. Замер в контейнере 23.11: каталог лежит на устройстве 0:51, строка
+    /// замка записана как `00:33`. Пока разбор был десятичным, живой владелец
+    /// читался как ушедший — и разрешение на работу агентам гасло при включённом
+    /// окне.
+    #[cfg(unix)]
+    #[test]
+    fn a_device_number_is_read_as_hexadecimal_not_decimal() {
+        let line = "10: FLOCK  ADVISORY  WRITE 9 00:33:2158851 0 EOF\n";
+        assert!(parse_proc_locks(line, libc::makedev(0, 51) as u64, 2158851), "00:33 — это 0:51, а не 0:33");
+        assert!(!parse_proc_locks(line, libc::makedev(0, 33) as u64, 2158851), "0:33 — чужое устройство");
+        // Буквы в номере десятичный разбор не осиливал вовсе и молча отвечал «не держат».
+        let line = "1: FLOCK ADVISORY WRITE 7 fd:0a:12 0 EOF\n";
+        assert!(parse_proc_locks(line, libc::makedev(0xfd, 0x0a) as u64, 12), "fd:0a — законный номер устройства");
     }
 
     // Два рабочих места не конфликтуют. Проверяется на обеих ОС, но разным:

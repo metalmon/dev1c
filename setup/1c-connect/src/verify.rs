@@ -1688,9 +1688,9 @@ mod tests {
 
     #[test]
     fn a_busy_base_in_a_foreign_publication_names_their_own_remedy() {
-        static CAUSE: crate::onec_error::Cause =
-            crate::onec_error::Cause { what: crate::onec_error::SESSION_LIMIT, fix: "закройте лишние сеансы 1С" };
-        let cause = &CAUSE;
+        // Причина — настоящая, из таблицы: своя подделка Cause здесь завела бы
+        // второе место с номером области 13, которого нет в таблице.
+        let cause = crate::onec_error::explain("Превышено количество сеансов").expect("ограничение узнаётся");
         // В чужой публикации сеанс держит пул её веб-сервера, и управлять им
         // нам нечем: человек должен прочитать, что это ожидаемо, и чем это
         // лечится у них.
@@ -1699,7 +1699,7 @@ mod tests {
         assert!(c.hint.contains("перезапуск платформы"), "{c:?}");
         // В своей публикации совет платформы остаётся как есть.
         let own = extension_fact(Some(&Reach::Refused(cause)), None, "auto");
-        assert_eq!(own.hint, "закройте лишние сеансы 1С");
+        assert_eq!(own.hint, cause.fix);
     }
 
     #[test]

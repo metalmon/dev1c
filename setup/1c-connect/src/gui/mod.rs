@@ -1000,8 +1000,13 @@ fn handle(ev: Ev, cx: &mut App) {
             // В подвал — короткая причина, а не сырой текст: в двух строках
             // подвала отказ платформы всё равно обрезается многоточием, и
             // человек читает его начало вместо смысла.
-            let status = match cause {
-                Some(c) => Line { kind: Kind::Fail, text: c.what.to_string() },
+            //
+            // С номерами (`explain_line`): показываем причину 1С, а не наш
+            // отказ, и номер места, где упали, доезжает до человека только
+            // первым числом этой строки.
+            let short = matches!(line.kind, Kind::Fail).then(|| crate::onec_error::explain_line(&line.text)).flatten();
+            let status = match &short {
+                Some(text) => Line { kind: Kind::Fail, text: text.clone() },
                 None => line.clone(),
             };
             set_status(ui, status, None);
@@ -1016,10 +1021,7 @@ fn handle(ev: Ev, cx: &mut App) {
             if hidden {
                 // Во всплывающем окне ОС места ещё меньше, чем в подвале:
                 // туда тем более короткая причина, а не текст платформы.
-                let body = match cause {
-                    Some(c) => c.what.to_string(),
-                    None => line.text.clone(),
-                };
+                let body = short.unwrap_or_else(|| line.text.clone());
                 cx.show_system_notification(SystemNotification {
                     tag: "op".into(),
                     title: "1c-connect".into(),

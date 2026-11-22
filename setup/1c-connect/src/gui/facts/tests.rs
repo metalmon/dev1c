@@ -335,7 +335,7 @@ fn checks_print_into_the_log_as_facts_with_a_hint_on_its_own_line() {
 #[test]
 fn the_window_log_numbers_a_fact_exactly_as_the_report_does() {
     let numbered = Check::fail_code(1530, "комплект", "нет vrunner", "скопируйте комплект заново");
-    let lines = check_lines(&[numbered.clone()]);
+    let lines = check_lines(std::slice::from_ref(&numbered));
     assert_eq!(lines[0].text, "1530 · комплект: нет vrunner");
     // Совет остаётся ОТДЕЛЬНОЙ строкой со своим значком и без номера:
     // диктуют причину, а не совет.

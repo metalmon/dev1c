@@ -20,17 +20,40 @@ fn main() {
     embed_resource::compile("icons/app.rc", embed_resource::NONE).manifest_optional().unwrap();
 }
 
-/// Вывод `git` одной строкой или `None`, если `git` не нашёлся, отказал или
-/// промолчал. Отказ `git` сборку не валит: комплект собирают и из копии без
+/// Вывод команды одной строкой или `None`, если она не нашлась, отказала или
+/// промолчала. Ни один отказ сборку не валит: комплект собирают и из копии без
 /// `.git`, а сборка, которая этого не умеет, не соберётся у того, кто её
 /// починил бы.
-fn git(dir: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git").current_dir(dir).args(args).output().ok()?;
+fn run(prog: &str, dir: &Path, args: &[&str]) -> Option<String> {
+    let out = Command::new(prog).current_dir(dir).args(args).output().ok()?;
     if !out.status.success() {
         return None;
     }
     let line = String::from_utf8(out.stdout).ok()?.trim().to_string();
     (!line.is_empty()).then_some(line)
+}
+
+/// То же про `git`: имя программы повторяется в четырёх местах, и путать его
+/// с `dir` на каждом вызове незачем.
+fn git(dir: &Path, args: &[&str]) -> Option<String> {
+    run("git", dir, args)
+}
+
+/// Местный день от системы. Не UTC: человек на звонке говорит «двадцать
+/// второе», и метка обязана говорить то же — ночная сборка, подписанная
+/// вчерашним днём, ломает ровно то, ради чего метка заведена.
+///
+/// Через подпроцесс, потому что местный сдвиг в std не добыть, а новых крейтов
+/// добавлять нельзя. Формат просим машинный (`yyyy-MM-dd`, `%F`), а не
+/// локальный: вывод под чужой локалью `parse_ymd` отвергнет целиком, и дорога
+/// уйдёт на запасную — соврать датой она не даст.
+fn local_ymd(dir: &Path) -> Option<(u64, u64, u64)> {
+    let said = if cfg!(windows) {
+        run("powershell", dir, &["-NoProfile", "-Command", "(Get-Date).ToString('yyyy-MM-dd')"])
+    } else {
+        run("date", dir, &["+%F"])
+    };
+    common::code::parse_ymd(&said?)
 }
 
 /// Выдать обе формы метки в `BUILD_STAMP_SHORT` и `BUILD_STAMP_FULL`.
@@ -42,13 +65,18 @@ fn stamp() {
     // так ветку значит соврать — имени ветки у такой сборки нет.
     let branch = match git(dir, &["rev-parse", "--abbrev-ref", "HEAD"]) {
         Some(name) if name != "HEAD" => name,
-        _ => "сборка".to_string(),
+        _ => common::code::NO_BRANCH.to_string(),
     };
     watch_git(dir);
 
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let (short, full) = common::code::stamp_dates(secs);
-    println!("cargo:rustc-env=BUILD_STAMP_SHORT={}", common::code::stamp_short(&short, &branch));
+    // Команда за датой не вышла — считаем сами от секунд эпохи. Это UTC, и
+    // ночью метка отстанет на день; без даты она была бы хуже.
+    let (y, m, d) = local_ymd(dir).unwrap_or_else(|| {
+        let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|t| t.as_secs()).unwrap_or(0);
+        common::code::ymd_utc(secs)
+    });
+    let (short, full) = common::code::stamp_dates(y, m, d);
+    println!("cargo:rustc-env=BUILD_STAMP_SHORT={}", common::code::stamp_short(&short, hash.as_deref(), &branch));
     println!("cargo:rustc-env=BUILD_STAMP_FULL={}", common::code::stamp_full(&full, hash.as_deref(), &branch));
 }
 

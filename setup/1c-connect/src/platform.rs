@@ -302,10 +302,8 @@ pub fn pins_on_disk(cfg: &Cfg) -> Pins {
     // смотрят обе оси» была сделана наполовину. Ниже, у `default`, обход
     // всегда был по всем каталогам — расхождение жило в двух соседних
     // строках.
-    let base = starter_dirs()
-        .into_iter()
-        .filter_map(|d| read_1c_text(&d.join("ibases.v8i")))
-        .find_map(|t| base_pin(&t, &cfg.host.base_path));
+    let base =
+        starter_dirs().into_iter().filter_map(|d| read_1c_text(&d.join("ibases.v8i"))).find_map(|t| base_pin(&t, &cfg.host.base_path));
     let default = starter_dirs()
         .into_iter()
         .map(|d| d.join(starter_cfg_name()))

@@ -136,7 +136,11 @@ pub fn write_vrd(pub_dir: &Path, text: &str) -> Result<(), String> {
 #[cfg(unix)]
 fn ensure_pub_dir(dir: &Path) -> Result<(), String> {
     use std::os::unix::fs::DirBuilderExt;
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).map_err(|e| format!("{} не создан: {e}", dir.display()))?;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .map_err(|e| common::code::say(1425, format!("{} не создан: {e}", dir.display())))?;
     // `mode()` у DirBuilder действует только на вновь созданные каталоги; если
     // каталог остался с прошлого запуска (или с версии до этого фикса) с более
     // широкими правами — поджимаем явно, а не оставляем как есть.
@@ -145,13 +149,14 @@ fn ensure_pub_dir(dir: &Path) -> Result<(), String> {
 
 #[cfg(not(unix))]
 fn ensure_pub_dir(dir: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("{} не создан: {e}", dir.display()))
+    std::fs::create_dir_all(dir).map_err(|e| common::code::say(1426, format!("{} не создан: {e}", dir.display())))
 }
 
 #[cfg(unix)]
 fn tighten_dir(dir: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| format!("права {} не выставлены: {e}", dir.display()))
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| common::code::say(1427, format!("права {} не выставлены: {e}", dir.display())))
 }
 
 #[cfg(unix)]
@@ -164,16 +169,17 @@ fn write_owner_only(path: &Path, text: &str) -> Result<(), String> {
         .truncate(true)
         .mode(0o600)
         .open(path)
-        .map_err(|e| format!("{} не создан: {e}", path.display()))?;
-    f.write_all(text.as_bytes()).map_err(|e| format!("{} не записан: {e}", path.display()))?;
+        .map_err(|e| common::code::say(1428, format!("{} не создан: {e}", path.display())))?;
+    f.write_all(text.as_bytes()).map_err(|e| common::code::say(1429, format!("{} не записан: {e}", path.display())))?;
     // Та же причина, что и у каталога: `mode()` в OpenOptions действует только
     // при создании файла — если он остался с прошлого запуска, поджимаем.
-    f.set_permissions(std::fs::Permissions::from_mode(0o600)).map_err(|e| format!("права {} не выставлены: {e}", path.display()))
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| common::code::say(1430, format!("права {} не выставлены: {e}", path.display())))
 }
 
 #[cfg(not(unix))]
 fn write_owner_only(path: &Path, text: &str) -> Result<(), String> {
-    std::fs::write(path, text).map_err(|e| format!("{} не записан: {e}", path.display()))
+    std::fs::write(path, text).map_err(|e| common::code::say(1431, format!("{} не записан: {e}", path.display())))
 }
 
 /// Пути одной публикации: свой httpd (Windows) или системный apache2
@@ -201,11 +207,9 @@ pub struct Paths {
 /// временный, настоящий 1cv8 искать не нужно.
 pub(crate) fn module_in(bin: &Path) -> Result<PathBuf, String> {
     let names: &[&str] = if cfg!(windows) { &["wsap24.dll", "wsap24t.dll"] } else { &["wsap24.so", "wsap24t.so"] };
-    names
-        .iter()
-        .map(|n| bin.join(n))
-        .find(|p| p.exists())
-        .ok_or_else(|| format!("рядом с платформой в {} нет модуля веб-сервера 1С ({})", bin.display(), names.join("/")))
+    names.iter().map(|n| bin.join(n)).find(|p| p.exists()).ok_or_else(|| {
+        common::code::say(1432, format!("рядом с платформой в {} нет модуля веб-сервера 1С ({})", bin.display(), names.join("/")))
+    })
 }
 
 /// Пути, зависящие только от каталога состояния коннектора (`state`) — не от
@@ -252,15 +256,14 @@ impl Paths {
     pub fn of(cfg: &Cfg, kit: &Kit) -> Result<Paths, String> {
         let (root, state) = bases(&kit.root, &ops_host::state_dir());
         if cfg!(windows) && !root.join("bin").join("httpd.exe").exists() {
-            return Err(format!(
-                "в {} нет bin/httpd.exe — скопируйте полный комплект заново (комплект: {})",
-                root.display(),
-                kit.root.display()
+            return Err(common::code::say(
+                1433,
+                format!("в {} нет bin/httpd.exe — скопируйте полный комплект заново (комплект: {})", root.display(), kit.root.display()),
             ));
         }
         let exe = ops_host::find_1cv8(cfg)
-            .ok_or_else(|| "платформа 1С не найдена — установите её или укажите переменную ONEC_PLATFORM".to_string())?;
-        let bin = exe.parent().ok_or_else(|| format!("у {} нет каталога", exe.display()))?;
+            .ok_or_else(|| common::code::say(1434, "платформа 1С не найдена — установите её или укажите переменную ONEC_PLATFORM"))?;
+        let bin = exe.parent().ok_or_else(|| common::code::say(1435, format!("у {} нет каталога", exe.display())))?;
         let module = module_in(bin)?;
         Ok(paths_under(&state, root, module, cfg.http_port()))
     }
@@ -335,7 +338,7 @@ fn linux_httpd_conf(p: &Paths) -> Result<String, String> {
         .pid
         .parent()
         .filter(|d| !d.as_os_str().is_empty())
-        .ok_or_else(|| format!("у {} нет каталога — не могу вычислить DefaultRuntimeDir", p.pid.display()))?;
+        .ok_or_else(|| common::code::say(1436, format!("у {} нет каталога — не могу вычислить DefaultRuntimeDir", p.pid.display())))?;
     Ok(format!(
         "ServerRoot \"{root}\"\n\
 ServerName localhost\n\
@@ -510,12 +513,12 @@ pub fn start(p: &Paths, lifetime: Lifetime) -> Result<(), String> {
     // короткую паузу ниже.
     cmd.args(["-f", &p.conf.to_string_lossy()]).stdout(Stdio::null()).stderr(Stdio::null());
     no_window(&mut cmd);
-    let mut child = cmd.spawn().map_err(|e| format!("{} не запустился: {e}", bin.display()))?;
+    let mut child = cmd.spawn().map_err(|e| common::code::say(1437, format!("{} не запустился: {e}", bin.display())))?;
     // Короткая пауза — дать серверу шанс упасть сразу (битый конфиг, занятый
     // порт), прежде чем считать процесс запущенным и уходить.
     std::thread::sleep(std::time::Duration::from_millis(300));
     if let Ok(Some(status)) = child.try_wait() {
-        return Err(format!("httpd завершился сразу (код {:?}): {}", status.code(), error_log_tail(&p.log, 5)));
+        return Err(common::code::say(1438, format!("httpd завершился сразу (код {:?}): {}", status.code(), error_log_tail(&p.log, 5))));
     }
     match lifetime {
         Lifetime::Detached => {
@@ -526,7 +529,9 @@ pub fn start(p: &Paths, lifetime: Lifetime) -> Result<(), String> {
             drop(child);
         }
         Lifetime::WithCaller => {
-            let Some(job) = job::Job::new() else { return Err("не удалось создать Job Object для httpd".to_string()) };
+            let Some(job) = job::Job::new() else {
+                return Err(common::code::say(1439, "не удалось создать Job Object для httpd"));
+            };
             job.assign_std(&child);
             *WINDOWS_HTTPD.lock().unwrap() = Some(WindowsHttpd { child, _job: job });
         }
@@ -595,7 +600,7 @@ fn start_failure_text(port: u16, apache_text: &str, holder: Option<&str>) -> Str
 /// Detached/WithCaller — чисто windows-овская, Job Object там не бывает.
 #[cfg(not(windows))]
 pub fn start(p: &Paths, _lifetime: Lifetime) -> Result<(), String> {
-    apache2_on_path().ok_or_else(|| "apache2 не найден ни в $PATH, ни в /usr/sbin, /usr/local/sbin, /sbin — установите пакет apache2 или переключите publication на \"webserver\"".to_string())?;
+    apache2_on_path().ok_or_else(|| common::code::say(1440, "apache2 не найден ни в $PATH, ни в /usr/sbin, /usr/local/sbin, /sbin — установите пакет apache2 или переключите publication на \"webserver\""))?;
     let _ = std::process::Command::new("apache2").args(["-f", &p.conf.to_string_lossy(), "-k", "stop"]).output();
     // Дать прежнему серверу отпустить порт. Без этой паузы `-k start` видит
     // ещё живой pid, печатает «httpd (pid N) already running», ВЫХОДИТ С
@@ -607,12 +612,12 @@ pub fn start(p: &Paths, _lifetime: Lifetime) -> Result<(), String> {
     let out = std::process::Command::new("apache2")
         .args(["-f", &p.conf.to_string_lossy(), "-k", "start"])
         .output()
-        .map_err(|e| format!("apache2 не запустился: {e}"))?;
+        .map_err(|e| common::code::say(1441, format!("apache2 не запустился: {e}")))?;
     if !out.status.success() {
         let tail = error_log_tail(&p.log, 5);
         let detail = if tail.is_empty() { String::from_utf8_lossy(&out.stderr).trim().to_string() } else { tail };
         let apache_text = format!("apache2 -k start: {detail}");
-        return Err(start_failure_text(p.port, &apache_text, holder::of_port(p.port).as_deref()));
+        return Err(common::code::say(1442, start_failure_text(p.port, &apache_text, holder::of_port(p.port).as_deref())));
     }
     // Код возврата доказательством не считаем — он нулевой и у «already
     // running», и у запуска, который упадёт секундой позже (битый модуль,
@@ -623,7 +628,7 @@ pub fn start(p: &Paths, _lifetime: Lifetime) -> Result<(), String> {
         let said = String::from_utf8_lossy(&out.stdout).trim().to_string();
         let detail = if tail.is_empty() { said } else { format!("{said} {tail}").trim().to_string() };
         let apache_text = format!("apache2 -k start отработал, но на 127.0.0.1:{} никто не отвечает: {detail}", p.port);
-        return Err(start_failure_text(p.port, &apache_text, holder::of_port(p.port).as_deref()));
+        return Err(common::code::say(1443, start_failure_text(p.port, &apache_text, holder::of_port(p.port).as_deref())));
     }
     Ok(())
 }
@@ -670,9 +675,9 @@ pub fn stop(p: &Paths) -> Result<(), String> {
     let out = std::process::Command::new("apache2")
         .args(["-f", &p.conf.to_string_lossy(), "-k", "stop"])
         .output()
-        .map_err(|e| format!("apache2 не запустился: {e}"))?;
+        .map_err(|e| common::code::say(1444, format!("apache2 не запустился: {e}")))?;
     if !out.status.success() {
-        return Err(format!("apache2 -k stop: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        return Err(common::code::say(1445, format!("apache2 -k stop: {}", String::from_utf8_lossy(&out.stderr).trim())));
     }
     Ok(())
 }

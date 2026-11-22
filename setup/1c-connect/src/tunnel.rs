@@ -42,21 +42,43 @@ pub fn classify(e: anyhow::Error) -> TunnelError {
     }
 }
 
+/// Номера области 16 (мост и сеанс) — ВСЕМУ классу туннельных отказов.
+///
+/// Для туннельного рабочего места это самый частый звонок: отказ отсюда уходит
+/// `run` → `session::State::Failed` → карточка, подвал окна, журнал. Пока
+/// номеров тут не было, человек диктовал по телефону одни слова, и попасть из
+/// них в точку кода можно было только угадыванием — против чего и писана вся
+/// ветка.
+///
+/// Сторож этого места не видел и не увидит: он знает ПЯТЬ образцов голого
+/// отказа (`BARE` в `common::code`), а `impl Display` для своего типа ошибки
+/// среди них нет и быть не может — отказ здесь не вызов, а ветка `match`. Его
+/// молчание про этот файл ничего не доказывало.
 impl std::fmt::Display for TunnelError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TunnelError::Local(e) => write!(f, "на этой машине: {e}"),
-            TunnelError::Auth => write!(f, "сервер не принял логин и пароль рабочего места — проверьте workstation и password в 1c-connect.toml"),
-            TunnelError::HostKeyChanged { old, new } => write!(
-                f,
-                "отпечаток сервера изменился: был {old}, стал {new}. Если среду переустанавливали — удалите known_hosts рядом с файлом параметров (или 1c-connect uninstall) и подключитесь заново"
+        let text = match self {
+            TunnelError::Local(e) => common::code::say(1613, format!("на этой машине: {e}")),
+            TunnelError::Auth => common::code::say(
+                1609,
+                "сервер не принял логин и пароль рабочего места — проверьте workstation и password в 1c-connect.toml",
             ),
-            TunnelError::Forward(p) => write!(
-                f,
-                "сервер отказал в пробросе порта {p}: у кого-то ещё поднят туннель этого рабочего места, или workstation в 1c-connect.toml не ваш"
+            TunnelError::HostKeyChanged { old, new } => common::code::say(
+                1612,
+                format!(
+                    "отпечаток сервера изменился: был {old}, стал {new}. Если среду переустанавливали — удалите known_hosts рядом с файлом параметров (или 1c-connect uninstall) и подключитесь заново"
+                ),
             ),
-            TunnelError::Net(e) => write!(f, "нет связи с сервером: {e} — проверьте server в 1c-connect.toml и что среда запущена"),
-        }
+            TunnelError::Forward(p) => common::code::say(
+                1611,
+                format!(
+                    "сервер отказал в пробросе порта {p}: у кого-то ещё поднят туннель этого рабочего места, или workstation в 1c-connect.toml не ваш"
+                ),
+            ),
+            TunnelError::Net(e) => {
+                common::code::say(1610, format!("нет связи с сервером: {e} — проверьте server в 1c-connect.toml и что среда запущена"))
+            }
+        };
+        write!(f, "{text}")
     }
 }
 impl std::error::Error for TunnelError {}
@@ -306,6 +328,39 @@ mod loop_tests {
         assert!(TunnelError::Forward(7771).to_string().contains("7771"));
         assert!(TunnelError::Net("x".into()).to_string().contains("server"));
         assert!(TunnelError::Local("known_hosts: нет прав".into()).to_string().contains("known_hosts"));
+    }
+
+    /// Номер несёт КАЖДЫЙ туннельный отказ, и номер стоит головой строки.
+    ///
+    /// Тест здесь — единственный сторож этого класса: общий сторож в
+    /// `common::code` ищет пять образцов вызова, а `impl Display` — ветки
+    /// `match`, и его молчание про этот файл ничего не значило (так класс и
+    /// просуществовал всю ветку без номеров). Перечисление по вариантам, а не
+    /// по одному образцу: добавят шестой — он тут же окажется непокрытым.
+    #[test]
+    fn every_tunnel_refusal_dictates_a_number_of_area_16() {
+        let all = [
+            TunnelError::Auth,
+            TunnelError::Net("x".into()),
+            TunnelError::Forward(7771),
+            TunnelError::HostKeyChanged { old: "a".into(), new: "b".into() },
+            TunnelError::Local("y".into()),
+        ];
+        let mut seen = Vec::new();
+        for e in &all {
+            let text = e.to_string();
+            let (code, rest) = common::code::split(&text);
+            let code = code.unwrap_or_else(|| panic!("туннельный отказ без номера: {text}"));
+            assert_eq!(code / 100, 16, "{text}");
+            assert!(!rest.is_empty(), "{text}");
+            seen.push(code);
+        }
+        // Один номер — одно место: общий сторож столкновения считает, но
+        // пропусти он эти пять, и считать было бы нечего.
+        seen.sort_unstable();
+        let n = seen.len();
+        seen.dedup();
+        assert_eq!(seen.len(), n, "два варианта с одним номером: {seen:?}");
     }
 
     #[test]

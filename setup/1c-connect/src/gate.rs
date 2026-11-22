@@ -53,67 +53,96 @@ pub fn cold_gate(
 ) -> Option<String> {
     // Срок — раньше всего остального: когда он вышел, смотреть ниже нечего,
     // работу коннектор не обслуживает (тот же порядок, что в `verify::order`).
-    if matches!(licence, licence::State::Expired) {
-        return Some(format!("срок действия истёк {}", licence::until_text()));
+    // Номер — от факта (`verify::licence_fact`): причина одна, поверхностей
+    // (ворота и отчёт «Проверить») — две, а номер у них не расходится.
+    let deadline = crate::verify::licence_fact(licence);
+    if !deadline.ok {
+        return Some(common::code::say(deadline.code, format!("срок действия истёк {}", licence::until_text())));
     }
     if !params_exists {
-        return Some("нет файла параметров — заполните поля и нажмите «Сохранить»".into());
+        // Тот же файл спрашивает и `verify::params_fact` (`kit.state_path`
+        // обоих вызовов — одно и то же выражение): номер общий, подсказка
+        // своя — здесь нечего «впишите значения», человек их только заполняет.
+        let params = crate::verify::params_fact(params_exists, &cfg.host.server);
+        return Some(common::code::say(params.code, "нет файла параметров — заполните поля и нажмите «Сохранить»"));
     }
     // Отказ лестницы 1С приходит словами и годится как есть: «платформа не
     // найдена» или «версия 8.2.19 (поле platform в 1c-connect.toml) не
     // установлена». Молчаливый откат на новейшую был бы ложью про то, на чём
     // идёт работа (спека, «Версия платформы: та же, что выберет 1С»).
+    //
+    // Номера тут пока нет: `ops_host::platform_choice` его не несёт (разметит
+    // задача 6) — выдумывать свой здесь означало бы вторую формулировку
+    // причины с третьим числом про неё же.
     if let Err(why) = platform {
         return Some(why.to_string());
     }
     if !mcp_in_kit {
-        return Some("в комплекте нет mcp-1c".into());
+        // Факт про `mcp-1c` живёт прямо внутри `verify::gather`, не вынесен в
+        // функцию и сам ходит на диск — чистой `cold_gate` его не взять.
+        // Причина своя, и номер поэтому свой.
+        return Some(common::code::say(1201, "в комплекте нет mcp-1c"));
     }
     // «Сделано» и ничего другого. Копии инструментов на машине больше нет
     // (леджер комплекта, пункт 15), поэтому единственный не-`Done` исход —
     // неполный комплект, и совет не «Установить», а взять комплект целиком:
     // поставить нам нечего, брать нечего.
+    //
+    // `verify::tools_fact` тоже ходит на диск (строит `OpState` сам) и делит
+    // исход на два номера (неполный комплект и «занято»); здесь любой не-
+    // `Done` — одна причина без разбора, и у неё свой номер.
     if !matches!(tools, OpState::Done(_)) {
-        return Some("инструментов в комплекте нет (vrunner/, git/, httpd/) — скопируйте полный комплект заново".into());
+        return Some(common::code::say(1202, "инструментов в комплекте нет (vrunner/, git/, httpd/) — скопируйте полный комплект заново"));
     }
     let h = &cfg.host;
     // Пустое поле — «не указана база», а не «каталога  нет»: в пустой строке
-    // человеку нечего прочитать.
+    // человеку нечего прочитать. Причина своя, не факта (`verify::base_fact`
+    // для пустой строки сказал бы именно «каталога  нет»), и номер поэтому
+    // свой.
     if h.base_path.trim().is_empty() {
-        return Some("не указана база".into());
+        return Some(common::code::say(1203, "не указана база"));
     }
     // Правило про базу не переписываем: оно уже записано фактом проверки
     // (`verify::base_fact`) — каталог обязателен только файловой базе, а
     // `сервер\база` и сетевой путь существованием не проверяются, иначе
-    // серверная база заперла бы переключатель навсегда.
-    if !crate::verify::base_fact(&h.base_path, base_exists).ok {
-        return Some(format!("каталога базы {} нет", h.base_path));
+    // серверная база заперла бы переключатель навсегда. Номер — тот самый,
+    // что у факта: причина одна.
+    let base = crate::verify::base_fact(&h.base_path, base_exists);
+    if !base.ok {
+        return Some(common::code::say(base.code, format!("каталога базы {} нет", h.base_path)));
     }
-    // Правило про пользователя базы — там же, где факт (`verify::db_user_is_set`):
-    // поверхностей две, но расходиться им нельзя.
-    if !crate::verify::db_user_is_set(&h.db_user) {
-        return Some("не задан пользователь базы".into());
+    // Правило про пользователя базы — там же, где факт (`verify::db_user_fact`):
+    // поверхностей две, но расходиться им нельзя, номер — общий.
+    let db_user = crate::verify::db_user_fact(&h.db_user);
+    if !db_user.ok {
+        return Some(common::code::say(db_user.code, "не задан пользователь базы"));
     }
     // Чужая публикация: адрес её знает только человек, и без него включать
     // нечего — стучать не по чему. Подходит под определение из шапки файла
     // дословно: смертельно для работы и видно без сети. В режиме `auto`
     // адрес считается сам, и этого условия там не бывает.
+    //
+    // У пустого адреса есть номер и в `verify` (1519), но несёт его приватная
+    // `publication_responds_fact` — её не позвать отсюда ни по видимости, ни
+    // по смыслу: она судит по результату сетевой пробы, которого у чистой
+    // функции нет. Причина своя, номер свой.
     if cfg.publication_address_missing() {
-        return Some("не задан адрес публикации — впишите его и нажмите «Сохранить»".into());
+        return Some(common::code::say(1204, "не задан адрес публикации — впишите его и нажмите «Сохранить»"));
     }
     // Данные для подключения к среде есть только у туннеля: в локальном режиме
     // этих трёх полей в окне нет вовсе (`panel::shown_fields`), и запирать ими
     // переключатель значило бы спрашивать человека о том, чего ему не
-    // показывают.
+    // показывают. Фактов про заполненность этих трёх полей в `verify` нет —
+    // номера свои.
     if h.mode != "local" {
         if h.server.trim().is_empty() {
-            return Some("не задан адрес среды".into());
+            return Some(common::code::say(1205, "не задан адрес среды"));
         }
         if h.password.is_empty() {
-            return Some("не задан пароль рабочего места".into());
+            return Some(common::code::say(1206, "не задан пароль рабочего места"));
         }
         if h.workstation.trim().is_empty() {
-            return Some("не задано имя рабочего места".into());
+            return Some(common::code::say(1207, "не задано имя рабочего места"));
         }
     }
     None
@@ -215,7 +244,7 @@ mod tests {
         let mut c = crate::cfg::filled_for_test();
         c.host.publication = "webserver".into();
         c.host.base_url = String::new();
-        assert_eq!(open(&c).as_deref(), Some("не задан адрес публикации — впишите его и нажмите «Сохранить»"));
+        assert_eq!(open(&c).as_deref(), Some("1204 · не задан адрес публикации — впишите его и нажмите «Сохранить»"));
         c.host.base_url = "http://localhost/Buh/hs/mcp-1c".into();
         assert_eq!(open(&c), None);
         // В обычном режиме адрес считается сам — замку там не за что цепляться.
@@ -261,7 +290,7 @@ mod tests {
     fn an_empty_base_says_so_instead_of_naming_an_empty_directory() {
         let mut c = crate::cfg::filled_for_test();
         c.host.base_path = "  ".into();
-        assert_eq!(open(&c).as_deref(), Some("не указана база"));
+        assert_eq!(open(&c).as_deref(), Some("1203 · не указана база"));
     }
 
     /// Кого спрашивать у диска: только файловую базу. Правило сверяется с самим
@@ -342,6 +371,20 @@ mod tests {
             field(&mut local);
             assert_eq!(open(&local), None, "в локальном режиме поля «{mark}» в окне нет");
         }
+    }
+
+    /// Причина начинается с номера; причина из факта несёт номер факта, а
+    /// своя причина ворот (пустое поле) — свой.
+    #[test]
+    fn a_locked_switch_says_its_number_first() {
+        let mut c = crate::cfg::filled_for_test();
+        c.host.base_path = "C:\\Bases\\Нет".into();
+        let why = cold_gate(&c, true, false, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Valid).unwrap();
+        assert!(why.starts_with(&format!("{} · ", crate::verify::base_fact(&c.host.base_path, false).code)), "{why}");
+        // Пустое поле — своя причина ворот, не факта.
+        c.host.base_path = "  ".into();
+        let own = cold_gate(&c, true, false, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Valid).unwrap();
+        assert!(own.starts_with("12"), "{own}");
     }
 
     /// `gate_now` — то же самое, что звало бы окно: пустой каталог состояния

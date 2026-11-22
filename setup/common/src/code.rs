@@ -284,7 +284,6 @@ mod tests {
         "1c-connect/src/bridge.rs",
         "1c-connect/src/cfg.rs",
         "1c-connect/src/flow.rs",
-        "1c-connect/src/gate.rs",
         "1c-connect/src/gui/autostart.rs",
         "1c-connect/src/gui/facts.rs",
         "1c-connect/src/gui/gate.rs",

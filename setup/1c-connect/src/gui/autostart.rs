@@ -61,7 +61,10 @@ mod imp {
     }
 
     fn enable() -> Result<()> {
-        let exe = std::env::current_exe().context("не удалось узнать путь к программе")?;
+        // Номера области 11 (запуск). Отказ доезжает до журнала окна под
+        // приставкой «автозапуск: » (`tray::menu`), и свой номер у каждой оси:
+        // по телефону человек называет один, и он обязан вести в одну дорогу.
+        let exe = std::env::current_exe().context(common::code::say(1110, "не удалось узнать путь к программе"))?;
         let data = wide(&run_value(&exe));
         let subkey = wide(SUBKEY);
         let mut hkey: HKEY = std::ptr::null_mut();
@@ -134,14 +137,15 @@ mod imp {
     pub fn set(on: bool) -> Result<()> {
         let path = file_path();
         if on {
-            let exe = std::env::current_exe().context("не удалось узнать путь к программе")?;
+            // Своя линуксовая дорога — свой номер (см. `enable` на Windows).
+            let exe = std::env::current_exe().context(common::code::say(1111, "не удалось узнать путь к программе"))?;
             return write_text(&path, &desktop_entry(&exe));
         }
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
             // Файла нет — автозапуска и не было, это не ошибка.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e).context("не удалить файл автозапуска"),
+            Err(e) => Err(e).context(common::code::say(1112, "не удалить файл автозапуска")),
         }
     }
 }

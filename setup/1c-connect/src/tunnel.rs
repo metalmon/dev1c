@@ -96,7 +96,10 @@ impl Handler for ForwardHandler {
         let PublicKeyOrCertificate::PublicKey { key: pk, .. } = key else {
             return Err(TunnelError::Local("сервер предъявил сертификат, а не ключ — это не наша среда".into()).into());
         };
-        let line = format!("{} {}", self.server, pk.to_openssh().context("ключ хоста")?);
+        // Номер — чтобы отказ не остался голым: ключ, который не записывается в
+        // openssh-вид, человеку виден через `classify` → `Net` (1610), и без
+        // своего номера эта точка была бы неотличима от любого обрыва связи.
+        let line = format!("{} {}", self.server, pk.to_openssh().context(common::code::say(1614, "ключ хоста"))?);
         let fp = pk.fingerprint(HashAlg::Sha256).to_string();
         let known = std::fs::read_to_string(&self.known_hosts);
         let existing = known.as_ref().ok().cloned().unwrap_or_default();

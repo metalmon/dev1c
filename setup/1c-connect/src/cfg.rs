@@ -309,8 +309,13 @@ impl Cfg {
         if !p.exists() {
             return Ok(Cfg::default());
         }
-        let text = std::fs::read_to_string(&p).with_context(|| format!("не прочитать {}", p.display()))?;
-        let cfg: Cfg = toml::from_str(&text).with_context(|| format!("{FILE}: ошибка в файле параметров"))?;
+        // Номера области 10 на оба отказа чтения. Сломанный toml — самый
+        // вероятный звонок по этой области, и строка доезжает и до подвала
+        // окна, и до первой строки терминала. Сторож `with_context` в своих
+        // образцах прежде не держал, поэтому утверждение «голых отказов в
+        // крейте не осталось» было верно только для пяти образцов.
+        let text = std::fs::read_to_string(&p).with_context(|| common::code::say(1013, format!("не прочитать {}", p.display())))?;
+        let cfg: Cfg = toml::from_str(&text).with_context(|| common::code::say(1014, format!("{FILE}: ошибка в файле параметров")))?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -332,8 +337,12 @@ impl Cfg {
         if !p.exists() {
             return Ok(Cfg::default());
         }
-        let text = std::fs::read_to_string(&p).with_context(|| format!("не прочитать {}", p.display()))?;
-        toml::from_str(&text).with_context(|| format!("{FILE}: ошибка в файле параметров"))
+        // Свои номера, а не номера `load`: по телефону человек называет один
+        // из них, и он обязан вести ровно в одну дорогу — ту, откуда отказ
+        // пришёл (окно это `load_unchecked`, терминал — `load`). Один номер на
+        // две ветки отправил бы читающего гадать, какая из них сработала.
+        let text = std::fs::read_to_string(&p).with_context(|| common::code::say(1015, format!("не прочитать {}", p.display())))?;
+        toml::from_str(&text).with_context(|| common::code::say(1016, format!("{FILE}: ошибка в файле параметров")))
     }
 
     pub fn number(&self) -> Option<u16> {

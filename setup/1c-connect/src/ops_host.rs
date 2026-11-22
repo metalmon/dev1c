@@ -171,11 +171,15 @@ pub fn write_derived_fields(kit: &Kit, cfg: &mut Cfg, dry_run: bool) -> Result<V
         return Ok(Vec::new());
     }
     if !dry_run {
-        let mut text = std::fs::read_to_string(&path).with_context(|| format!("не прочитать {}", path.display()))?;
+        // Номера области 14 (операции): отказ доезжает до журнала окна под
+        // приставкой «параметры не дописаны: » (`gui::mod::start_op`) и до
+        // терминала у `1c-connect install`.
+        let mut text =
+            std::fs::read_to_string(&path).with_context(|| common::code::say(1465, format!("не прочитать {}", path.display())))?;
         for (key, value) in &fields {
             text = common::toml_render::set(&text, "[host]", key, value);
         }
-        std::fs::write(&path, &text).with_context(|| format!("не записать {}", path.display()))?;
+        std::fs::write(&path, &text).with_context(|| common::code::say(1466, format!("не записать {}", path.display())))?;
     }
     Ok(fields.into_iter().map(|(key, value)| format!("{key} = {value}")).collect())
 }

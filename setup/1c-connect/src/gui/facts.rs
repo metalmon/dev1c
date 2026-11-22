@@ -125,7 +125,17 @@ pub fn check_lines(checks: &[Check]) -> Vec<Line> {
             // `not_checked` в задаче 2), отдельной ветки под него не держим.
             (false, _) => Kind::Fail,
         };
-        out.push(Line { kind, text: format!("{}: {}", c.what, c.detail) });
+        // Номер факта — впереди слов, тем же `maybe_say`, которым его печатает
+        // отчёт (`common::check::line`). Пока склейка здесь была своя и голая,
+        // выходила инверсия замысла: номер стоял в `1c-connect.log` и в отчёте,
+        // куда человек не смотрит, и не стоял в журнале окна, откуда он диктует
+        // (находка финального ревью ветки).
+        //
+        // Не `reason_with("", c)`: та склеивает `detail` с советом через тире
+        // (`fact_detail`), а здесь совет идёт ОТДЕЛЬНОЙ строкой со своим
+        // значком — человек прочёл бы его дважды. Номер взят одной общей
+        // функцией, слова оставлены свои.
+        out.push(Line { kind, text: common::code::maybe_say(c.code, format!("{}: {}", c.what, c.detail)) });
         // Совет — у ЛЮБОГО факта, которому есть что добавить, а не только у
         // провалившегося (Minor 2 ревью задач 7+8): у занятого факта
         // («закройте «Предприятие»») он терялся, и человек читал в журнале
@@ -213,9 +223,7 @@ pub fn readiness_reason(check: &Check) -> String {
 /// второй порядок был бы четвёртой копией правила о месте номера, и расходился
 /// бы он молча, как уже разошлись десять наивных склеек в крейте.
 pub fn reason_with(prefix: &str, check: &Check) -> String {
-    let body = readiness_reason(check);
-    let numbered = if check.code == 0 { body } else { common::code::say(check.code, body) };
-    common::code::with_prefix(prefix, &numbered)
+    common::code::with_prefix(prefix, &common::code::maybe_say(check.code, readiness_reason(check)))
 }
 
 /// Подробность факта без его имени: что не так и что сделать, одной строкой.

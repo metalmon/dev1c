@@ -285,11 +285,17 @@ fn saving_away_a_cold_condition_douses_the_card_too() {
     assert_eq!(ui.link, State::Off, "карточка и переключатель обязаны показать «выключено»");
     // Строка про гашение ровно одна (про обновлённые параметры рядом —
     // своя и законная: это другое событие).
-    let doused: Vec<&Line> = ui.log[log_before..].iter().filter(|l| l.text.starts_with("MCP выключены:")).collect();
+    // Приставку ищем ВНУТРИ строки, а не с её начала: номер стоит впереди
+    // всего («1201 · MCP выключены: …», `code::with_prefix`), и `starts_with`
+    // по приставке означал бы требование спрятать номер в середину.
+    let doused: Vec<&Line> = ui.log[log_before..].iter().filter(|l| l.text.contains("MCP выключены:")).collect();
     // Какое именно условие назовёт строка, решает порядок `cold_gate`, а в
     // каталоге теста не выполнено сразу несколько — здесь проверяется сам
     // факт гашения со строкой, а список условий стережёт `gate::tests`.
     assert_eq!(doused.len(), 1, "{:?}", &ui.log[log_before..]);
+    // И номер этой строки доезжает до журнала головой — иначе человек, читая
+    // её вслух, продиктовал бы слова без числа.
+    assert!(common::code::split(&doused[0].text).0.is_some(), "{:?}", doused[0].text);
     let _ = ui.session.take().map(|s| s.stop());
 }
 

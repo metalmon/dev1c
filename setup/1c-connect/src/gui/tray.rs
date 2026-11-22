@@ -597,7 +597,14 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
                 if let Some(t) = &cx.global::<Ui>().tray {
                     t.autostart.set_checked(!on);
                 }
-                note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: format!("автозапуск: {e:#}") });
+                // Приставка через `with_prefix` — одно правило на крейт: отказ
+                // сюда приходит из `autostart::set` без номера сегодня, но
+                // наивная склейка спрятала бы номер в тот же день, когда он
+                // там появится, и молча.
+                note_line(
+                    cx.global_mut::<Ui>(),
+                    Line { kind: Kind::Fail, text: common::code::with_prefix("автозапуск: ", &format!("{e:#}")) },
+                );
             }
         }
         MenuAction::Autoconnect => {
@@ -608,7 +615,10 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
                 if let Some(t) = &cx.global::<Ui>().tray {
                     t.autoconnect.set_checked(!on);
                 }
-                note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: format!("автоподключение: {e:#}") });
+                note_line(
+                    cx.global_mut::<Ui>(),
+                    Line { kind: Kind::Fail, text: common::code::with_prefix("автоподключение: ", &format!("{e:#}")) },
+                );
             }
         }
         MenuAction::Quit => quit(cx),

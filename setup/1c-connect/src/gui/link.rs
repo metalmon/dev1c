@@ -65,7 +65,9 @@ pub fn refresh_gate(ui: &mut Ui) {
         if let Some(why) = ui.gate.clone() {
             if ui.enabled.load(Ordering::Relaxed) {
                 douse_serving(ui);
-                note_line(ui, Line { kind: Kind::Warn, text: format!("MCP выключены: {why}") });
+                // Причина ворот несёт номер (1514 и соседи) — приставка садится
+                // за него, иначе номер уехал бы в середину строки журнала.
+                note_line(ui, Line { kind: Kind::Warn, text: common::code::with_prefix("MCP выключены: ", &why) });
             }
         }
     }
@@ -151,7 +153,10 @@ pub fn publication_failure(ui: &mut Ui, why: &str) -> State {
     if let Err(e) = crate::allow::write(&ui.kit, false) {
         note_line(ui, Line { kind: Kind::Warn, text: format!("признак разрешения не записан: {e:#}") });
     }
-    State::Failed(format!("публикация: {why}"))
+    // Отказ публикации нумерован (1438 «httpd завершился сразу» и соседи), а
+    // эта строка доезжает до подвала, трея, журнала и отказа агенту — всюду,
+    // откуда человек диктует. Приставка через `with_prefix`.
+    State::Failed(common::code::with_prefix("публикация: ", why))
 }
 
 /// Обслуживаются ли вызовы агента прямо сейчас — по тому самому флагу,
@@ -376,7 +381,12 @@ pub fn toggle_link(cx: &mut App) {
                 ui.raised_publication = false;
                 let ctx = quiet_ctx(ui);
                 if let Err(e) = ops_host::stop_own_publication(&ctx) {
-                    note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Warn, text: format!("HTTP-сервис базы не остановлен: {e:#}") });
+                    note_line(
+                        cx.global_mut::<Ui>(),
+                        Line {
+                            kind: Kind::Warn, text: common::code::with_prefix("HTTP-сервис базы не остановлен: ", &format!("{e:#}"))
+                        },
+                    );
                 }
             }
             // Прежний отказ bind больше не наш: порты мы отпустили, и

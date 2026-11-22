@@ -496,17 +496,13 @@ pub fn tray_tooltip(progress: Option<&Running>, link: &State, verdict: &Verdict,
 
 /// Приставка подсказки трея — и единственное место, где она клеится.
 ///
-/// Номер вынимается ВПЕРЁД всей фразы. Пока приставка клеилась руками, она
-/// вставала перед номером («1c-connect: 1206 · нельзя включить…»), и номер
-/// оказывался в середине строки — ровно та беда, которую уже лечили в воротах
-/// (`panel::gate_text`). Чинить её пришлось бы на каждом возврате, поэтому
-/// приставка здесь одна: ни один возврат `tray_tooltip` не склеивает её сам.
+/// Номер вынимается ВПЕРЁД всей фразы (`code::with_prefix`). Пока приставка
+/// клеилась руками, она вставала перед номером («1c-connect: 1206 · нельзя
+/// включить…»), и номер оказывался в середине строки. Чинить её пришлось бы
+/// на каждом возврате, поэтому приставка здесь одна: ни один возврат
+/// `tray_tooltip` не склеивает её сам.
 fn tip(text: impl AsRef<str>) -> String {
-    let text = text.as_ref();
-    match common::code::split(text) {
-        (Some(code), rest) => common::code::say(code, format!("1c-connect: {rest}")),
-        (None, _) => format!("1c-connect: {text}"),
-    }
+    common::code::with_prefix("1c-connect: ", text.as_ref())
 }
 
 /// Отменить можно обмен с git (`Push`/`Pull`) и работу платформы
@@ -697,7 +693,12 @@ pub fn run_op(cx: &mut App, which: Which) {
                 note_line(ui, Line { kind: Kind::Ok, text: format!("в {} записано: {}", cfg::FILE, wrote.join(", ")) })
             }
             Ok(_) => {}
-            Err(e) => note_line(ui, Line { kind: Kind::Fail, text: format!("параметры не дописаны: {e:#}") }),
+            Err(e) => note_line(
+                ui,
+                // Приставка через `with_prefix`: отказы `write_derived_fields`
+                // нумерованы (1409…1413), и номер обязан остаться головой.
+                Line { kind: Kind::Fail, text: common::code::with_prefix("параметры не дописаны: ", &format!("{e:#}")) },
+            ),
         }
     }
     sync_tray(ui, now);
@@ -842,7 +843,8 @@ pub fn quit(cx: &mut App) {
         Some(Ok(true)) => Some(Line { kind: Kind::Ok, text: "HTTP-сервис базы остановлен при выходе".into() }),
         Some(Ok(false)) | None => None,
         Some(Err(e)) => Some(Line {
-            kind: Kind::Warn, text: format!("HTTP-сервис базы не остановлен при выходе: {e:#}")
+            kind: Kind::Warn,
+            text: common::code::with_prefix("HTTP-сервис базы не остановлен при выходе: ", &format!("{e:#}")),
         }),
     };
     if let Some(line) = &line {
@@ -1373,7 +1375,11 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
         // Замок при запуске — строкой в журнал: человек видит серую точку и
         // запертый переключатель, и обязан прочитать, почему.
         if let Some(why) = &gate {
-            note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Warn, text: format!("MCP не включены при запуске: {why}") });
+            note_line(
+                cx.global_mut::<Ui>(),
+                // Причина ворот нумерована — приставка садится за номер.
+                Line { kind: Kind::Warn, text: common::code::with_prefix("MCP не включены при запуске: ", why) },
+            );
         }
         if serve_on_start {
             match start_session(cx.global_mut::<Ui>()) {

@@ -353,7 +353,11 @@ pub fn show_window(cx: &mut App) {
                 ui.unread = 0;
             }
         }
-        Err(e) => note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: format!("окно не открылось: {e:#}") }),
+        // Приставка через `with_prefix` — одно правило на крейт о месте номера.
+        Err(e) => note_line(
+            cx.global_mut::<Ui>(),
+            Line { kind: Kind::Fail, text: common::code::with_prefix("окно не открылось: ", &format!("{e:#}")) },
+        ),
     }
 }
 

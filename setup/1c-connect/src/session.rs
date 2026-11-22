@@ -119,12 +119,17 @@ impl State {
                     format!("{verb} {} ч {:02} мин", m / 60, m % 60)
                 }
             }
-            State::Retrying(why) => format!("переподключаюсь: {why}"),
+            // Приставки — через `with_prefix`: сюда приезжает текст
+            // `TunnelError` с номером области 16, и наивная склейка («не
+            // подключён: 1609 · сервер не принял логин…») спрятала бы номер в
+            // середине самой читаемой строки карточки — то есть по определению
+            // `code::split` оставила бы строку без номера.
+            State::Retrying(why) => common::code::with_prefix("переподключаюсь: ", why),
             State::Failed(why) => {
                 if local {
                     why.clone()
                 } else {
-                    format!("не подключён: {why}")
+                    common::code::with_prefix("не подключён: ", why)
                 }
             }
         }

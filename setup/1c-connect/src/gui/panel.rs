@@ -220,9 +220,13 @@ pub fn reason(link: &State, ready: &Verdict, gate: Option<&str>, at: Option<&str
         // слова: «не всё готово» — починить, «занято» — подождать или
         // закрыть базу (Critical 2: прежде `Busy` молчал, и жёлтая точка
         // оставалась без объяснения).
+        // Номер факта — головой строки, одним местом склейки на обе
+        // поверхности (`gui::reason_with`): в подвал человек смотрит и из него
+        // диктует, а номер жил отдельным полем `Check.code` и до сюда не
+        // доезжал вовсе.
         let why = match ready {
-            Verdict::NotReady(check) => Some(format!("Не всё готово: {}", gui::readiness_reason(check))),
-            Verdict::Busy(check) => Some(format!("Занято: {}", gui::readiness_reason(check))),
+            Verdict::NotReady(check) => Some(gui::reason_with("Не всё готово: ", check)),
+            Verdict::Busy(check) => Some(gui::reason_with("Занято: ", check)),
             _ => None,
         };
         if let Some(why) = why {

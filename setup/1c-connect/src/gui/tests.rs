@@ -222,6 +222,49 @@ fn tooltip_names_the_phase_and_minutes() {
     );
 }
 
+/// Номер провалившегося факта обязан доезжать до человека ТОЙ ЖЕ дорогой, что
+/// номер ворот: головой всей строки — и в подсказке значка, и в подвале окна.
+///
+/// Беда была в том, что номер факта живёт отдельным полем (`Check.code`) и
+/// склеивался со словами в одном месте — в отчёте (`common::check::line`). Ни
+/// `readiness_reason`, ни её потребители (`facts::warn_reason`,
+/// `panel::reason`) его не брали вовсе, и 1530, 1538 и прочие не доходили
+/// ровно туда, куда человек смотрит и откуда диктует.
+#[test]
+fn a_failed_fact_carries_its_number_to_the_tooltip_and_the_footer() {
+    let now = Instant::now();
+    let up = State::Up { since: now };
+    let numbered = Verdict::NotReady(Check::fail_code(1530, "дескриптор", "разошёлся с паролем базы", "1c-connect install"));
+
+    // Подсказка значка: номер впереди ВСЕЙ фразы, приставки включительно.
+    let tip = tray_tooltip(None, &up, &numbered, None, now);
+    assert!(tip.starts_with(&common::code::say(1530, "1c-connect: не всё готово: ")), "{tip}");
+
+    // Подвал: тот же номер и та же голова строки, что у ворот. Час проверки
+    // приписывается ПОСЛЕ — номер от этого с места не съезжает.
+    let foot = panel::reason(&up, &numbered, None, Some("15:54")).expect("подвалу есть что сказать");
+    assert!(foot.starts_with(&common::code::say(1530, "Не всё готово: ")), "{foot}");
+    assert!(foot.ends_with("· проверено в 15:54"), "{foot}");
+
+    // Второй жёлтый вердикт — та же дорога.
+    let busy = Verdict::Busy(Check::busy_code(1531, "база", "занята другим сеансом", "закройте 1С"));
+    assert_eq!(common::code::split(&tray_tooltip(None, &up, &busy, None, now)).0, Some(1531));
+    assert_eq!(common::code::split(&panel::reason(&up, &busy, None, None).expect("есть что сказать")).0, Some(1531));
+
+    // Ворота — дорога, которая работала и до починки; обе ветки проверяются
+    // одним тестом нарочно: пока он смотрел только на ворота, дыра в ветке
+    // факта пряталась за зелёным.
+    let gate = common::code::say(1514, "не задан пользователь базы");
+    assert_eq!(common::code::split(&tray_tooltip(None, &up, &Verdict::Ready, Some(&gate), now)).0, Some(1514));
+    assert_eq!(common::code::split(&panel::reason(&up, &Verdict::Ready, Some(&gate), None).expect("есть что сказать")).0, Some(1514));
+
+    // Факт без номера остаётся без него: ноль значит «номера нет», и выдумать
+    // его здесь нельзя — человек диктовал бы число, которого в коде нет.
+    let plain = Verdict::NotReady(Check::fail("проект", "не разложен", "1c-connect install"));
+    assert_eq!(common::code::split(&tray_tooltip(None, &up, &plain, None, now)).0, None);
+    assert_eq!(common::code::split(&panel::reason(&up, &plain, None, None).expect("есть что сказать")).0, None);
+}
+
 #[test]
 fn tick_redraws_when_the_window_is_open_or_something_changed() {
     // Окно открыто и в покое — минуты в карточке связи всё равно не

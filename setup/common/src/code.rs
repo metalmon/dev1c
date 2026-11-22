@@ -308,7 +308,6 @@ mod tests {
         "1c-connect/src/local.rs",
         "1c-connect/src/main.rs",
         "1c-connect/src/platform.rs",
-        "1c-connect/src/project.rs",
         "1c-connect/src/session.rs",
         "1c-connect/src/single_instance.rs",
         "1c-connect/src/tunnel.rs",

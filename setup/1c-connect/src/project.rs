@@ -72,9 +72,12 @@ pub fn layout_state(p: &Project) -> Layout {
 /// файла не будет вовсе.
 pub fn init(p: &Project, tools: &Path, analyzer: &[(&'static str, String)], log: &dyn Fn(String)) -> Result<(), String> {
     if let Some(f) = looks_like_a_base(&p.dir) {
-        return Err(format!("{} — это каталог базы ({f}), не проекта; укажите другой каталог в project", p.dir.display()));
+        return Err(common::code::say(
+            1446,
+            format!("{} — это каталог базы ({f}), не проекта; укажите другой каталог в project", p.dir.display()),
+        ));
     }
-    std::fs::create_dir_all(p.dir.join("src")).map_err(|e| format!("не создать {}: {e}", p.dir.display()))?;
+    std::fs::create_dir_all(p.dir.join("src")).map_err(|e| common::code::say(1447, format!("не создать {}: {e}", p.dir.display())))?;
     if !p.dir.join(".git").exists() {
         must(p, &["init", "-q", "-b", &p.branch])?;
         log(format!("git init, ветка {}", p.branch));
@@ -96,7 +99,7 @@ pub fn init(p: &Project, tools: &Path, analyzer: &[(&'static str, String)], log:
     for (name, body) in [(".gitattributes", GITATTRIBUTES), (".gitignore", GITIGNORE), ("autumn-properties.json", PROPERTIES)] {
         let f = p.dir.join(name);
         if !f.exists() {
-            std::fs::write(&f, body).map_err(|e| format!("{name}: {e}"))?;
+            std::fs::write(&f, body).map_err(|e| common::code::say(1448, format!("{name}: {e}")))?;
             log(format!("{name} создан"));
         }
     }
@@ -205,8 +208,9 @@ fn git_cmd(p: &Project, args: &[&str]) -> Command {
 }
 
 fn git(p: &Project, args: &[&str]) -> Result<Out, String> {
-    let o =
-        git_cmd(p, args).output().map_err(|e| format!("git не запускается ({}): {e} — выполните 1c-connect install", p.git.display()))?;
+    let o = git_cmd(p, args)
+        .output()
+        .map_err(|e| common::code::say(1449, format!("git не запускается ({}): {e} — выполните 1c-connect install", p.git.display())))?;
     let mut text = String::from_utf8_lossy(&o.stdout).to_string();
     text.push_str(&String::from_utf8_lossy(&o.stderr));
     Ok(Out { ok: o.status.success(), text: common::docker::redact_text(text.trim()) })
@@ -217,7 +221,9 @@ fn must(p: &Project, args: &[&str]) -> Result<String, String> {
     if o.ok {
         Ok(o.text)
     } else {
-        Err(format!("git {}: {}", args.join(" "), o.text))
+        // Один номер на все провалившиеся команды git: место в коде одно, а
+        // чем именно недоволен git — говорит его собственный вывод за номером.
+        Err(common::code::say(1450, format!("git {}: {}", args.join(" "), o.text)))
     }
 }
 
@@ -231,11 +237,10 @@ fn git_wait(p: &Project, args: &[&str], cancel: &AtomicBool) -> Result<Out, Stri
     if cancel.load(Ordering::Relaxed) {
         return Err("прервано".into());
     }
-    let mut child = git_cmd(p, args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("git не запускается ({}): {e} — выполните 1c-connect install", p.git.display()))?;
+    let mut child =
+        git_cmd(p, args).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| {
+            common::code::say(1451, format!("git не запускается ({}): {e} — выполните 1c-connect install", p.git.display()))
+        })?;
     let (mut out_h, mut err_h) = (child.stdout.take(), child.stderr.take());
     let out_thread = std::thread::spawn(move || {
         let mut buf = Vec::new();
@@ -259,12 +264,12 @@ fn git_wait(p: &Project, args: &[&str], cancel: &AtomicBool) -> Result<Out, Stri
             // процесса — ждать их здесь незачем, важно только «прервано».
             return Err("прервано".into());
         }
-        match child.try_wait().map_err(|e| e.to_string())? {
+        match child.try_wait().map_err(|e| common::code::say(1452, e.to_string()))? {
             Some(_) => break,
             None => std::thread::sleep(std::time::Duration::from_millis(250)),
         }
     }
-    let status = child.wait().map_err(|e| e.to_string())?;
+    let status = child.wait().map_err(|e| common::code::say(1453, e.to_string()))?;
     let mut text = String::from_utf8_lossy(&out_thread.join().unwrap_or_default()).to_string();
     text.push_str(&String::from_utf8_lossy(&err_thread.join().unwrap_or_default()));
     Ok(Out { ok: status.success(), text: common::docker::redact_text(text.trim()) })
@@ -275,7 +280,7 @@ fn must_wait(p: &Project, args: &[&str], cancel: &AtomicBool) -> Result<String, 
     if o.ok {
         Ok(o.text)
     } else {
-        Err(format!("git {}: {}", args.join(" "), o.text))
+        Err(common::code::say(1454, format!("git {}: {}", args.join(" "), o.text)))
     }
 }
 
@@ -302,12 +307,14 @@ fn ensure_origin(p: &Project) -> Result<(), String> {
     // Один заслон на `init`, `pull` и `push`: пустой адрес не уезжает в
     // `git remote set-url` и не превращается в «origin не отвечает».
     if p.remote.is_empty() {
-        return Err(crate::cfg::no_gitea());
+        // Номер — на месте отказа, а не в `cfg::no_gitea`: тот же текст живёт в
+        // состоянии шага и в факте проверки (1504), и номер там не наш.
+        return Err(common::code::say(1455, crate::cfg::no_gitea()));
     }
     // Каталог без `.git` — не «ошибка git», а невыполненная установка; `init`
     // сюда приходит уже после `git init`, поэтому заслон общий.
     if !p.dir.join(".git").exists() {
-        return Err(not_laid_out(&p.dir));
+        return Err(common::code::say(1456, not_laid_out(&p.dir)));
     }
     match git(p, &["remote", "get-url", "origin"])? {
         Out { ok: true, text } if text.trim() == p.remote => Ok(()),
@@ -437,17 +444,20 @@ pub fn pull(p: &Project, cancel: &AtomicBool) -> Result<String, String> {
     // A fresh project has no branch on the server yet — that comes first:
     // its tree is "dirty" too, and the useful answer is "export first".
     if !remote_has(p, &p.branch)? {
-        return Err(format!("ветки {} в Gitea ещё нет — сначала «Выгрузить из 1С» (cf_decompile, затем project_push)", p.branch));
+        return Err(common::code::say(
+            1457,
+            format!("ветки {} в Gitea ещё нет — сначала «Выгрузить из 1С» (cf_decompile, затем project_push)", p.branch),
+        ));
     }
     if !must(p, &["status", "--porcelain"])?.is_empty() {
-        return Err("в каталоге проекта есть незакоммиченные изменения — сначала project_push".into());
+        return Err(common::code::say(1458, "в каталоге проекта есть незакоммиченные изменения — сначала project_push"));
     }
     let attempt = || -> Result<String, String> {
         let o = git_wait(p, &["pull", "--rebase", "origin", &p.branch], cancel)?;
         if o.ok {
             Ok(format!("{}\nтеперь cf_load", o.text))
         } else {
-            Err(o.text)
+            Err(common::code::say(1459, o.text))
         }
     };
     match retry_once(PULL_RETRY_PAUSE, cancel, attempt) {
@@ -458,11 +468,14 @@ pub fn pull(p: &Project, cancel: &AtomicBool) -> Result<String, String> {
                 // Half-applied rebase is worse than none: cf_load would read a tree
                 // with conflict markers. Back out and hand the merge to a human.
                 let _ = git(p, &["rebase", "--abort"]);
-                return Err(format!(
-                    "конфликт в {} — разрешите в каталоге проекта {} (git pull --rebase origin {} и правка файлов); дерево возвращено в состояние до pull",
-                    conflicted.replace('\n', ", "),
-                    p.dir.display(),
-                    p.branch
+                return Err(common::code::say(
+                    1460,
+                    format!(
+                        "конфликт в {} — разрешите в каталоге проекта {} (git pull --rebase origin {} и правка файлов); дерево возвращено в состояние до pull",
+                        conflicted.replace('\n', ", "),
+                        p.dir.display(),
+                        p.branch
+                    ),
                 ));
             }
             Err(e)
@@ -484,7 +497,7 @@ pub fn push(p: &Project, message: &str, cancel: &AtomicBool) -> Result<String, S
         .filter(|r| p.dir.join(r).exists())
         .collect();
     if roots.is_empty() {
-        return Err(format!("в {} нет src — сначала cf_decompile", p.dir.display()));
+        return Err(common::code::say(1461, format!("в {} нет src — сначала cf_decompile", p.dir.display())));
     }
     let mut add = vec!["add", "--"];
     add.extend(roots);
@@ -530,7 +543,7 @@ pub fn doing() -> &'static str {
 /// Готовая строка отказа — одна формулировка на все пути: мьютекс в памяти,
 /// файл на диске, агент моста.
 fn busy(what: &str) -> String {
-    format!("занято: идёт {}", if what.is_empty() { "другая операция" } else { what })
+    common::code::say(1462, format!("занято: идёт {}", if what.is_empty() { "другая операция" } else { what }))
 }
 
 /// Каталог, в котором `hold` держит файл замка (`<dir>/project.lock`).
@@ -598,7 +611,7 @@ pub fn hold(what: &str) -> Result<Hold, String> {
             // (`doing()` знает только про этот процесс), поэтому «другая
             // операция»: готовая, не выдуманная вторая формулировка.
             Ok(None) => return Err(busy(doing())),
-            Err(e) => return Err(e.to_string()),
+            Err(e) => return Err(common::code::say(1463, e.to_string())),
         },
     };
     DOING.store(DOING_NAMES.iter().position(|n| *n == what).unwrap_or(1), Relaxed);
@@ -626,7 +639,7 @@ pub fn call(p: &Project, tool: &str, args: &Value) -> (String, bool) {
         "project_status" => status(p),
         "project_pull" => pull(p, &NEVER),
         "project_push" => push(p, args.get("message").and_then(Value::as_str).unwrap_or(""), &NEVER),
-        other => Err(format!("нет инструмента {other}")),
+        other => Err(common::code::say(1464, format!("нет инструмента {other}"))),
     };
     match r {
         Ok(t) => (t, false),
@@ -1121,7 +1134,9 @@ mod tests {
         let d = tempdir::Dir::new();
         set_lock_target(d.path());
         let g = hold("project_push").unwrap();
-        assert_eq!(hold("project_status").err(), Some("занято: идёт project_push".to_string()));
+        // Номер впереди слов: «занято» человек диктует по телефону так же, как
+        // любой другой отказ операции.
+        assert_eq!(hold("project_status").err(), Some(common::code::say(1462, "занято: идёт project_push")));
         drop(g);
         // Цель — глобал на процесс: следующий тест её не должен застать —
         // ставит её только сам (`without_a_target_the_lock_is_in_memory_only`).

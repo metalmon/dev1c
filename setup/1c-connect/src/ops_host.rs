@@ -562,6 +562,9 @@ pub fn platform_report(cfg: &crate::cfg::Cfg) -> (Result<crate::platform::Choice
     use crate::platform::{Choice, Why};
     if let Some(dir) = std::env::var_os(ONEC_PLATFORM) {
         let dir = PathBuf::from(dir);
+        // Без номера НАРОЧНО, как и отказы `platform::resolve`: эта строка
+        // уходит двумя дверями, и номер ставит дверь — `platform_choice` (1403)
+        // воротам, `verify::platform_fact` (1503) отчёту «Проверить».
         let choice = platform_from(&dir)
             .ok_or_else(|| format!("в каталоге {} из ONEC_PLATFORM нет исполняемого файла платформы", dir.display()))
             .map(|exe| {
@@ -2148,6 +2151,20 @@ mod tests {
     fn an_operation_refusal_says_its_number() {
         let e = env_line("tunnel", "").unwrap_err().to_string();
         assert!(common::code::split(&e).0.is_some_and(|c| c / 100 == 14), "{e}");
+    }
+
+    /// Два номера в подвале окна собираются из НАСТОЯЩЕГО номера операции.
+    ///
+    /// `onec_error::explain_line` склеивает место и причину («1420·1301»), и
+    /// первое число — ровно то, что ставит разметка этого файла: без неё подвал
+    /// показывал бы причину 1С без места, где операция упала. Номер взят живой
+    /// (1420 — установка расширения, единственный путь, которым ответ 1С сюда и
+    /// приходит), а не выдуманный: выдуманный не доказал бы ничего.
+    #[test]
+    fn the_footer_glues_a_real_operation_number_to_the_cause_from_1c() {
+        let refusal = common::code::say(1420, "расширение не установилось: Превышено количество сеансов");
+        let line = crate::onec_error::explain_line(&refusal).expect("причину 1С узнали");
+        assert!(line.starts_with("1420·1301 · "), "{line}");
     }
 
     /// Причина отказа платформы доезжает до ворот С НОМЕРОМ.

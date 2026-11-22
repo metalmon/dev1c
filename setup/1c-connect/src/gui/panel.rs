@@ -101,6 +101,25 @@ pub struct Fields {
     pub issued: Entity<InputState>,
 }
 
+/// Просьба человека, которой не хватило полей, — и слова отказа, если правку карточки ОТКАЗАЛИ.
+///
+/// Хранится ДЕЙСТВИЕ, а не список полей, и это не мелочь: список протух бы в ту же секунду, когда человек заполнит поле, —
+/// подсветка осталась бы висеть на заполненном. Действие же пересчитывается каждой отрисовкой (`need::missing`), и подсветка
+/// гаснет сама, поле за полем, по мере заполнения. Решение владельца 10.11: кнопка остаётся живой, а нажатие ВЕДЁТ к
+/// незаполненному, вместо запертой кнопки или молчаливого отказа строкой журнала.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Asked {
+    /// Дело, чьи незаполненные поля подсвечены.
+    deed: crate::need::Deed,
+    /// Отказ словами — РОВНО те, что ушли в журнал (`save::set_keys` → `breaks_connection`), а не их пересказ: отказ правки обязан
+    /// дойти до того, кто щёлкнул, а не только до вкладки «Журнал» (закон 7 блоков окна), и начертание у обоих мест одно.
+    ///
+    /// `None` — отказывать было нечего: человек нажал действие, которому не хватило полей, и слова ему называет подсказка кнопки
+    /// (`main_button`) ещё ДО щелчка. Второй раз, после щелчка, то же самое не говорится — на экране один предмет назван один раз
+    /// (закон 2 блоков окна).
+    said: Option<SharedString>,
+}
+
 pub struct Panel {
     pub focus: FocusHandle,
     pub fields: Fields,
@@ -121,17 +140,10 @@ pub struct Panel {
     /// `selected_connection` (с откатом на текущее, если имя из списка
     /// исчезло); саму перекладку в поля делает `select`.
     pub selected: String,
-    /// Действие, которое человек ПОПРОСИЛ, а полей ему не хватило. Пока оно
-    /// здесь — незаполненные поля этого действия подсвечены.
-    ///
-    /// Хранится ДЕЙСТВИЕ, а не список полей, и это не мелочь: список
-    /// протух бы в ту же секунду, когда человек заполнит поле, — подсветка
-    /// осталась бы висеть на заполненном. Действие же пересчитывается
-    /// каждой отрисовкой (`need::missing`), и подсветка гаснет сама, поле за
-    /// полем, по мере заполнения. Решение владельца 10.11: кнопка остаётся
-    /// живой, а нажатие ВЕДЁТ к незаполненному, вместо запертой кнопки или
-    /// молчаливого отказа строкой журнала.
-    asked: Option<crate::need::Deed>,
+    /// Просьба человека, которой не хватило полей. Пока она здесь —
+    /// незаполненные поля подсвечены, а отказ, если он был, стоит словами в
+    /// карточке.
+    asked: Option<Asked>,
     /// Правится ли сейчас имя выделенной строки: заголовок подменяется полем ввода.
     ///
     /// Отдельного поля «Имя» в карточке больше нет — имя говорилось дважды, заголовком строки и полем под ним (находка 36 обхода
@@ -2252,7 +2264,14 @@ pub fn axis_plan(q: Question, answer: &'static str, is_current: bool, was_local:
 /// Отказ трея называет, что именно идёт (`tray::busy_refusal`), и перерисовывает окно сам: на этой ветви больше никто не
 /// перерисовывает, и человек щёлкнул бы впустую. На УДАЧНОМ пути трея перевязка и перерисовка — его собственные, и звать их
 /// второй раз нечего, поэтому шаг трея всегда последний.
-fn perform_axis(cx: &mut App, name: &str, plan: Vec<Step>) {
+///
+/// **Отдаёт слова отказа ЗАПИСИ, и отдаёт их обязательно** (`#[must_use]`, починка 22.11): журнальную строку эта функция пишет
+/// сама, но журнал — это «потом, при разборе», а человеку, который щёлкнул, отказ нужен сейчас и у карточки
+/// (`lead_the_refusal_to_the_card`). Прежде она отказ съедала, и дальше её никто о нём спросить не мог — ровно так дефект и
+/// прятался. `None` — записано всё. Отказ ТРЕЯ сюда не входит: он не про незаполненное поле (идёт операция, и щелчок надо
+/// повторить позже), подсвечивать по нему нечего, и слова ему место только в журнале.
+#[must_use]
+fn perform_axis(cx: &mut App, name: &str, plan: Vec<Step>) -> Option<String> {
     for step in plan {
         let wrote = match &step {
             Step::Keys(keys) => gui::set_keys(cx.global_mut::<Ui>(), name, keys),
@@ -2263,7 +2282,7 @@ fn perform_axis(cx: &mut App, name: &str, plan: Vec<Step>) {
                     gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: why });
                     cx.refresh_windows();
                 }
-                return;
+                return None;
             }
             Step::PublicationUnderSession(answer) => {
                 if !gui::tray::request_current_publication_change(cx, answer) {
@@ -2271,26 +2290,67 @@ fn perform_axis(cx: &mut App, name: &str, plan: Vec<Step>) {
                     gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: why });
                     cx.refresh_windows();
                 }
-                return;
+                return None;
             }
         };
         if let Err(e) = wrote {
-            gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+            gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e.clone() });
             cx.refresh_windows();
-            return;
+            return Some(e);
         }
         sync_card_topology(cx, name);
     }
     cx.refresh_windows();
+    None
+}
+
+/// Дело, к незаполненным полям которого ведёт ОТКАЗ ответа на вопрос карточки. Двойник `deed_of` у действий подвала, и по той же
+/// причине: подсветить можно только то, что просит ДЕЛО (`need::missing`), а «ответ» ничего не просит.
+///
+/// **Профиль «Разработчик» — это и есть выбор дела.** Набор инструментов разработчика выгружает из 1С и загружает в неё, и ровно
+/// поэтому у него, в отличие от бизнес-профиля, папка обязана быть заполнена (`Connection::validate`: «у набора `business`
+/// каталога исходников нет и быть не может»). `Deed::Dump` и `Deed::Load` просят РОВНО одного и того же (`need::wanted`: оба —
+/// база и папка), так что для подсветки они взаимозаменимы; названо то из двух, которое человек делает первым — выгрузку.
+///
+/// Остальные ответы — `None`: подсвечивать нечего, и слова их отказа остаются в журнале. Отказ, не названный ПОЛЕМ, человек в
+/// карточке и не исправит — в карточке нет того, на что он указал бы.
+fn deed_of_answer(q: Question, answer: &str) -> Option<crate::need::Deed> {
+    match (q, answer) {
+        (Question::Profile, "developer") => Some(crate::need::Deed::Dump),
+        _ => None,
+    }
+}
+
+/// Отказ правки — до человека ТАМ, где он щёлкнул: слова в карточку, подсветка на поле, курсор в поле (закон 7 блоков окна,
+/// «нажатие ведёт»; раздел «Отказ правки: слова у карточки»).
+///
+/// Зовётся ПОСЛЕ журнальной строки и теми же словами: журнал нужен потом, при разборе, а человеку — сейчас. Своей формулировки
+/// здесь нет и быть не может — строка приходит готовой от того, кто отказал (`save::breaks_connection`).
+///
+/// Чужая открытая карточка не трогается вовсе (`original.name != name`) — тот же приём и тот же довод, что у
+/// `sync_card_topology`: запись в соседа её не касается. Панель в этот миг свободна: сюда приходят из пункта выпадающего списка, а
+/// он исполняется отложенно, следующим кадром (`parts::menu_item`), — тот же довод, по которому отложена и `Panel::ask`.
+fn lead_the_refusal_to_the_card(window: &mut Window, cx: &mut App, name: &str, deed: crate::need::Deed, said: String) {
+    let Some(panel) = cx.global::<Ui>().panel.clone() else { return };
+    panel.update(cx, |this, cx| {
+        if this.original.name == name {
+            this.lead_to(deed, Some(said.into()), window, cx);
+        }
+    });
 }
 
 /// Ответ на вопрос карточки: решение считается (`axis_plan`), потом исполняется (`perform_axis`). Одна дверь на все пять.
-fn answer_card(cx: &mut App, name: &str, q: Question, answer: &'static str) {
+///
+/// **Отказ дальше журнала не кончается** (починка 22.11): записать не удалось — человеку говорят это у карточки и ведут его в
+/// поле, которого не хватило (`deed_of_answer` → `lead_the_refusal_to_the_card`).
+fn answer_card(window: &mut Window, cx: &mut App, name: &str, q: Question, answer: &'static str) {
     let (is_current, was_local) = {
         let ui = cx.global::<Ui>();
         (ui.cfg.current().name == name, ui.cfg.by_name(name).map(|c| c.mode == "local").unwrap_or(false))
     };
-    perform_axis(cx, name, axis_plan(q, answer, is_current, was_local));
+    let Some(said) = perform_axis(cx, name, axis_plan(q, answer, is_current, was_local)) else { return };
+    let Some(deed) = deed_of_answer(q, answer) else { return };
+    lead_the_refusal_to_the_card(window, cx, name, deed, said);
 }
 
 /// Перевязать `self.original` открытой карточки на ПЯТЬ осей — `role`,
@@ -2799,10 +2859,7 @@ impl Panel {
     /// Чего не хватает, знает одна мера на продукт (`need::missing`) — та же, что отвечает замку.
     fn ask(&mut self, act: LinkAct, subject: &str, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(deed) = deed_of(act) {
-            if let Some(first) = crate::need::missing(deed, &self.original).first().copied() {
-                self.asked = Some(deed);
-                self.focus_field(first, window, cx);
-                cx.notify();
+            if self.lead_to(deed, None, window, cx) {
                 return;
             }
             // Хватило — подсветка снимается: она принадлежала просьбе, а просьба исполнена.
@@ -2819,6 +2876,24 @@ impl Panel {
         // вопрос «занята ли панель» отвечали бы в четырёх местах по-разному.
         let subject = subject.to_string();
         window.defer(cx, move |window, cx| run_link_act(window, cx, act, &subject));
+    }
+
+    /// Довести просьбу до человека ТАМ, где он её высказал: подсветить незаполненные поля дела, поставить курсор в первое и — если
+    /// правку отказали словами — поставить эти слова в карточку. `false` — вести некуда, полей хватает.
+    ///
+    /// **Одна дорога на оба случая, и завелась она ради второго.** Нажатие главной кнопки ею шло с 10.11, а отказ ответа на вопрос
+    /// карточки не доходил до человека вовсе: список закрывался, подпись оставалась прежней, и всё — слова уходили в журнал, во
+    /// вкладку, в которую человек в этот миг не смотрит (живой прогон 22.11, «в такой конфигурации нельзя переключить на режим
+    /// разработчика. Почему?»). Механизм при этом в окне УЖЕ был, и мимо него прошли.
+    ///
+    /// Чего не хватает, знает одна мера на продукт (`need::missing`) — та же, что отвечает замку и красит подписи. Второй меры
+    /// «чего не хватает» здесь не заводится: слова отказа приходят готовыми, а КУДА вести — спрашивается только у неё.
+    fn lead_to(&mut self, deed: crate::need::Deed, said: Option<SharedString>, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(first) = crate::need::missing(deed, &self.original).first().copied() else { return false };
+        self.asked = Some(Asked { deed, said });
+        self.focus_field(first, window, cx);
+        cx.notify();
+        true
     }
 
     /// Курсор в поле, которого не хватило. Поля адресуются тем же ключом, каким их зовёт состав сочетания (`cfg::shown_fields`), — второго
@@ -3256,7 +3331,11 @@ impl Panel {
         //
         // Чего не хватает — спрашиваем у единственной меры (`need::missing`), той же, что отвечает замку: двух мнений о заполненности в
         // продукте нет.
-        let wanted = self.asked.map(|d| crate::need::missing(d, &c)).unwrap_or_default();
+        let wanted = self.asked.as_ref().map(|a| crate::need::missing(a.deed, &c)).unwrap_or_default();
+        // **Слова отказа висят на ТОЙ ЖЕ мере, что и подсветка.** Иначе строка «переключение не записано: … впишите это поле»
+        // осталась бы стоять над полем, которое человек только что заполнил, — и второй мерой «чего не хватает» оказалось бы само
+        // наличие этой строки. Гаснут обе половины вместе, одним условием.
+        let refused = self.asked.as_ref().and_then(|a| a.said.clone()).filter(|_| !wanted.is_empty());
         // Цвет берётся ДО замыкания: само замыкание не держит `cx`, иначе кнопка выбора папки рядом не смогла бы его одолжить.
         let danger = cx.theme().danger;
         let mark = |key: &str| if wanted.iter().any(|f| f.key() == key) { danger } else { caption };
@@ -3302,7 +3381,8 @@ impl Panel {
         };
         let name = c.name.clone();
         // Профиль — поле КАРТОЧКИ (решение владельца 7 плана «Модель
-        // соединений»), и правится он здесь же: `save::set_profile` пишет
+        // соединений»), и правится он здесь же: ответ уходит одной дверью на
+        // все пять вопросов карточки (`answer_card` → `set_keys`), и пишется
         // один ключ названной карточки, не трогая ни папку, ни соседей.
         // Стрелка справа (`dropdown_caret`) — решение владельца 9.11: без неё
         // кнопка со словом ответа читалась как обычная, а не как
@@ -3336,9 +3416,9 @@ impl Panel {
                 // 2 ревью круга починки 1): один словарь на карточку,
                 // отрисовку и онбординг, иначе слова однажды разойдутся.
                 // Первые два пишут роль (`answer_card` — а
-                // уход из «одной машины» для них уводит и режим, см. её
-                // докстроку); третий ставит `mode = "local"` и роль не
-                // трогает.
+                // уход из «одной машины» для них уводит и режим, см.
+                // докстроку `axis_plan`, правило 3); третий ставит
+                // `mode = "local"` и роль не трогает.
                 // Та же стрелка, что у «Профиля» выше — пять кнопок
                 // выбора в карточке и списке получают её одним приёмом.
                 .child(
@@ -3352,7 +3432,9 @@ impl Panel {
                             let [dial, accept] = link::onboarding_answers();
                             for (label, answer) in [link::LOCAL_ANSWER, accept, dial] {
                                 let name = name.clone();
-                                menu = menu.item(parts::menu_item(label, move |_, cx| answer_card(cx, &name, Question::Topology, answer)));
+                                menu = menu.item(parts::menu_item(label, move |window, cx| {
+                                    answer_card(window, cx, &name, Question::Topology, answer)
+                                }));
                             }
                             parts::menu(Slot::Field, menu)
                         }),
@@ -3405,8 +3487,8 @@ impl Panel {
                             .copied()
                             .map(|here| {
                                 let name = name.clone();
-                                let act: parts::Act = std::rc::Rc::new(move |_: &mut Window, cx: &mut App| {
-                                    answer_card(cx, &name, Question::BaseHere, if here { "true" } else { "false" })
+                                let act: parts::Act = std::rc::Rc::new(move |window: &mut Window, cx: &mut App| {
+                                    answer_card(window, cx, &name, Question::BaseHere, if here { "true" } else { "false" })
                                 });
                                 (SharedString::from(base_here_label(here)), act)
                             })
@@ -3459,8 +3541,8 @@ impl Panel {
                             .into_iter()
                             .map(|(words, publication)| {
                                 let name = name.clone();
-                                let act: parts::Act = std::rc::Rc::new(move |_: &mut Window, cx: &mut App| {
-                                    answer_card(cx, &name, Question::Publication, publication)
+                                let act: parts::Act = std::rc::Rc::new(move |window: &mut Window, cx: &mut App| {
+                                    answer_card(window, cx, &name, Question::Publication, publication)
                                 });
                                 (SharedString::from(words), act)
                             })
@@ -3489,14 +3571,23 @@ impl Panel {
                             .into_iter()
                             .map(|profile| {
                                 let name = name.clone();
-                                let act: parts::Act = std::rc::Rc::new(move |_: &mut Window, cx: &mut App| {
-                                    answer_card(cx, &name, Question::Profile, profile)
+                                let act: parts::Act = std::rc::Rc::new(move |window: &mut Window, cx: &mut App| {
+                                    answer_card(window, cx, &name, Question::Profile, profile)
                                 });
                                 (SharedString::from(profile_label(profile)), act)
                             })
                             .collect(),
                     );
                     col = col.child(profile_field);
+                    // **Отказ правки — здесь, между вопросом, на который человек ответил, и полем, которое он обязан заполнить.**
+                    // Место не случайное и не «куда влезло»: закон блоков окна велит такой дом называть, и он назван — раздел
+                    // «Отказ правки: слова у карточки». Сходится оно потому, что единственный ответ карточки, у которого вообще
+                    // есть дело с полями (`deed_of_answer`), — это профиль, а поле, которое это дело просит, стоит строкой ниже.
+                    // Человек читает сверху вниз ровно свой случай: щёлкнул по этому списку → вот почему не записалось → вот
+                    // красное поле, и курсор уже в нём.
+                    if let Some(said) = &refused {
+                        col = col.child(parts::note_refusal(danger, said.clone()));
+                    }
                     let button = pick("pick-project", f.project.clone(), cx);
                     col = col.child(path_row(folder_label(&toolset).to_string(), mark("project"), &f.project, button, window, cx));
                 }
@@ -4671,12 +4762,53 @@ mod tests {
             assert!(plan.iter().position(tray).map(|i| i + 1 == plan.len()).unwrap_or(true), "{plan:?}");
         }
     }
+
+    /// **Сторож на дорогу, а не на текст** — тем же приёмом, что `doom::refusal_road` в этом дереве: живого GPUI в тестах нет, и
+    /// «отказ показан человеку» держится здесь двумя чистыми половинами.
+    ///
+    /// **Чем куплено.** Отказ ответа на вопрос карточки доходил ТОЛЬКО до журнала. Владелец щёлкал «Профиль» → «Разработчик»,
+    /// список закрывался, подпись оставалась «Бизнес-пользователь», и на экране не менялось ничего — слова лежали во вкладке, в
+    /// которую он в этот миг не смотрел (живой прогон 22.11: «в такой конфигурации нельзя переключить на режим разработчика.
+    /// Почему?»). Сам отказ при этом законен (`save::breaks_connection`, замер —
+    /// `save::tests::the_owners_card_refuses_the_developer_profile_while_the_folder_is_empty`), а механизм показа в окне УЖЕ был, и
+    /// мимо него прошли.
+    ///
+    /// **Половина первая, чистая: у отказа есть ДЕЛО, и оно указывает в то же поле, которое назвал отказ.**
+    ///
+    /// **Половина вторая, на дорогу: отказ записи из `answer_card` обязан уходить к карточке, а не только в журнал.** Форму держит
+    /// `#[must_use]` на `perform_axis` (съесть отказ молча больше нельзя), но не держит адресата: `let _ = perform_axis(..)` прошёл
+    /// бы мимо компилятора и вернул бы дефект как есть. Текста отказа сторож не читает — он читает, что зов стоит.
+    #[test]
+    fn a_refused_answer_leads_to_the_empty_field_not_only_to_the_journal() {
+        use crate::need::{Deed, Field};
+        assert_eq!(deed_of_answer(Question::Profile, "developer"), Some(Deed::Dump), "«Разработчик» — это и есть выбор дела");
+        assert_eq!(deed_of_answer(Question::Profile, "business"), None, "бизнес-профиль папки не просит — отказывать нечем");
+        for q in [Question::Topology, Question::BaseHere, Question::Mode, Question::Publication] {
+            assert_eq!(deed_of_answer(q, "developer"), None, "{q:?}: дела, чьи поля можно подсветить, у этих ответов нет");
+        }
+        // Карточка живого прогона: принимает подключения, база на другом компьютере, профиль «Бизнес-пользователь», папка пуста.
+        let mut c = crate::cfg::filled_for_test().current().clone();
+        c.role = "accept".into();
+        c.base_here = false;
+        c.mode = "tunnel".into();
+        c.profile = "business".into();
+        c.project = String::new();
+        // Подсветка ведёт в папку — то самое поле, которое называет отказ («папка документов»), и единственное показанное у этого
+        // сочетания. В поля базы она не ведёт и повести не может: их этой карточке не показывают вовсе.
+        assert_eq!(crate::need::missing(Deed::Dump, &c), vec![Field::Project]);
+
+        const SRC: &str = include_str!("panel.rs");
+        let from = SRC.find("fn answer_card(").expect("`answer_card` на месте");
+        let body = &SRC[from..from + SRC[from..].find("\n}\n").expect("конец `answer_card` на месте")];
+        assert!(body.contains("perform_axis("), "ответ исполняется там же, где и исполнялся");
+        assert!(body.contains("lead_the_refusal_to_the_card("), "отказ записи обязан дойти до карточки, а не только до журнала");
+    }
     use super::{
-        accepting_block, adopt_needed, adopt_topology, axis_of, axis_plan, base_here_answers, can_save, card, delete_on_confirm,
-        delete_question_text, dial_card, dialling_block, enroll_facts, fact_rows, fields_differ, folder_label, found_text, issue_code,
-        leave_question, link_menu, live_code, main_button, nothing_to_show, op_question, pick_face, profile_label, project_facts,
-        project_menu, project_rows, publication_switch_label, reason, request_to_answer, resolve_selected, row_marks, save_hint,
-        shown_base_url, shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts, tools_actions, tools_subject,
+        accepting_block, adopt_needed, adopt_topology, axis_of, axis_plan, base_here_answers, can_save, card, deed_of_answer,
+        delete_on_confirm, delete_question_text, dial_card, dialling_block, enroll_facts, fact_rows, fields_differ, folder_label,
+        found_text, issue_code, leave_question, link_menu, live_code, main_button, nothing_to_show, op_question, pick_face, profile_label,
+        project_facts, project_menu, project_rows, publication_switch_label, reason, request_to_answer, resolve_selected, row_marks,
+        save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts, tools_actions, tools_subject,
         undecryptable_line, window_radius, Body, DeleteOnConfirm, Dirty, LinkAct, ProjectMenu, BOOK_UNREAD_NOTE, DELETE_CONFIRM_YES,
         GATE_WORD, NOT_ACCEPTING_NOTE, OFF_WORD, ONBOARDING_ASK, ROLE_UNKNOWN_NOTE,
     };

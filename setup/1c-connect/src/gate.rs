@@ -385,9 +385,16 @@ mod tests {
         let why = cold_gate(&c, true, false, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Valid).unwrap();
         assert!(why.starts_with(&format!("{} · ", crate::verify::base_fact(&c.host.base_path, false).code)), "{why}");
         // Пустое поле — своя причина ворот, не факта.
+        //
+        // Сверяем ГОЛОВУ строки целиком, а не `starts_with("12")`: то
+        // утверждение проходило на любом тексте, начинающемся с «12», — хоть
+        // на «12 часов», — то есть не проверяло ни номера, ни его места.
         c.host.base_path = "  ".into();
         let own = cold_gate(&c, true, false, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Valid).unwrap();
-        assert!(own.starts_with("12"), "{own}");
+        let (code, rest) = common::code::split(&own);
+        let code = code.unwrap_or_else(|| panic!("своя причина ворот без номера: {own}"));
+        assert_eq!(code / 100, 12, "{own}");
+        assert!(!rest.is_empty(), "{own}");
     }
 
     /// `gate_now` — то же самое, что звало бы окно: пустой каталог состояния

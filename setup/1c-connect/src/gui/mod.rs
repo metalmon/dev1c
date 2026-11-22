@@ -885,7 +885,10 @@ fn on_done(ui: &mut Ui, err: Option<String>, cancelled: bool) -> Line {
     ui.busy = None;
     let running = ui.progress.take();
     let line = if cancelled {
-        Line { kind: Kind::Warn, text: err.unwrap_or_else(|| "прервано".into()) }
+        // То же слово, что отдают `project`/`local` при отмене — одной
+        // константой, а не копией литерала: разойдясь, окно сказало бы об
+        // отмене не то, что пишет в журнал исполнитель.
+        Line { kind: Kind::Warn, text: err.unwrap_or_else(|| crate::local::CANCELLED.into()) }
     } else {
         match err {
             Some(e) => Line { kind: Kind::Fail, text: e },

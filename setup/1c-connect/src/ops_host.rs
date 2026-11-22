@@ -2201,6 +2201,12 @@ mod tests {
         )
         .expect("отказ платформы запирает переключатель");
         assert_eq!(common::code::split(&gate), common::code::split(&why), "{gate}");
+        // И подвал окна ставит номер впереди ВСЕЙ фразы, приставку — за ним.
+        #[cfg(feature = "gui")]
+        {
+            let shown = crate::gui::panel::gate_text(&gate);
+            assert_eq!(common::code::split(&shown).0, common::code::split(&why).0, "{shown}");
+        }
     }
 
     /// Адрес среды выводится только там, где вывод верен. В локальном режиме

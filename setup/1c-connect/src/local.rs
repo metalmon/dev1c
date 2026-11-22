@@ -41,6 +41,12 @@ const TICK: Duration = Duration::from_millis(250);
 
 /// Отмена долгой операции: тот же текст, что у git, — окно и журнал
 /// различают отмену от отказа по нему.
+///
+/// Номера у отмены нет нарочно, хотя остальные отказы этого файла размечены:
+/// отмену человек нажал сам, и звонить по ней не о чем. То же решение и то же
+/// слово живут в `project.rs` (`CANCELLED` сравнивают по тексту); нумеровать
+/// отмену — так обе стороны одним номером и в один ход, иначе одно «прервано»
+/// станет двумя разными строками и сравнение перестанет сходиться.
 pub const CANCELLED: &str = "прервано";
 
 /// Процесс на время одного вызова: `initialize` → `notifications/initialized`
@@ -83,7 +89,8 @@ pub fn call(
     }
     crate::job::group_std(&mut cmd);
     let job = crate::job::Job::new();
-    let mut child = cmd.spawn().map_err(|e| format!("vrunner-mcp не запустился: {e} — выполните 1c-connect install"))?;
+    let mut child =
+        cmd.spawn().map_err(|e| common::code::say(1604, format!("vrunner-mcp не запустился: {e} — выполните 1c-connect install")))?;
     if let Some(j) = &job {
         j.assign_std(&child);
     }
@@ -124,14 +131,14 @@ pub fn call(
         }
     });
     let send = |stdin: &mut std::process::ChildStdin, v: Value| {
-        stdin.write_all(&line(v)).and_then(|_| stdin.flush()).map_err(|e| format!("vrunner-mcp закрыл вход: {e}"))
+        stdin.write_all(&line(v)).and_then(|_| stdin.flush()).map_err(|e| common::code::say(1605, format!("vrunner-mcp закрыл вход: {e}")))
     };
     let deadline = std::time::Instant::now() + timeout;
     let wait_for = |id: i64| -> Result<Value, String> {
         loop {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             if left.is_zero() {
-                return Err(format!("vrunner-mcp не ответил за {} с", timeout.as_secs()));
+                return Err(common::code::say(1606, format!("vrunner-mcp не ответил за {} с", timeout.as_secs())));
             }
             // Ждём короткими отрезками, а не весь остаток срока: иначе флаг
             // отмены замечался бы через час, то есть никогда.
@@ -143,7 +150,7 @@ pub fn call(
                     }
                     continue;
                 }
-                Err(_) => return Err("vrunner-mcp завершился, не ответив".into()),
+                Err(_) => return Err(common::code::say(1607, "vrunner-mcp завершился, не ответив")),
             };
             let Ok(v) = serde_json::from_slice::<Value>(&l) else { continue };
             if v.get("id").and_then(Value::as_i64) == Some(id) {
@@ -165,7 +172,7 @@ pub fn call(
         send(&mut stdin, json!({"jsonrpc":"2.0","method":"notifications/initialized"}))?;
         send(&mut stdin, json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":tool,"arguments":args}}))?;
         let v = wait_for(2)?;
-        parse_reply(&v).ok_or_else(|| "vrunner-mcp ответил не результатом".to_string())
+        parse_reply(&v).ok_or_else(|| common::code::say(1608, "vrunner-mcp ответил не результатом"))
     })();
     drop(stdin);
     let _ = child.kill();

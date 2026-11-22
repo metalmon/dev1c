@@ -34,6 +34,14 @@ fn busy_port_text(port: u16, e: &std::io::Error) -> String {
     }
 }
 
+/// Тот же текст, но готовым отказом и с номером. Отдельной функцией, потому
+/// что бинд зовут дважды (IPv4 и IPv6): номер тут один — отказ один и тот же,
+/// «порт занять не удалось», — а два вызова с одним литералом сторож справедливо
+/// считал бы номером, выданным дважды.
+fn busy_port_err(port: u16, e: &std::io::Error) -> anyhow::Error {
+    anyhow::Error::msg(common::code::say(1601, busy_port_text(port, e)))
+}
+
 /// После скольких подряд ошибок `accept()` сеанс сдаётся вместо того, чтобы
 /// крутиться впустую (кончились дескрипторы или ошибка не проходит сама).
 const MAX_ACCEPT_ERRORS: u32 = 20;
@@ -56,10 +64,10 @@ const ACCEPT_ERROR_PAUSE: Duration = Duration::from_millis(200);
 /// молчать нельзя.
 async fn bind_loopback(port: u16) -> anyhow::Result<(TcpListener, Option<TcpListener>)> {
     use std::net::{Ipv4Addr, Ipv6Addr};
-    let v4 = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await.map_err(|e| anyhow::anyhow!(busy_port_text(port, &e)))?;
+    let v4 = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await.map_err(|e| busy_port_err(port, &e))?;
     let v6 = match TcpListener::bind((Ipv6Addr::LOCALHOST, port)).await {
         Ok(l) => Some(l),
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => return Err(anyhow::anyhow!(busy_port_text(port, &e))),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => return Err(busy_port_err(port, &e)),
         Err(_) => None,
     };
     Ok((v4, v6))
@@ -157,7 +165,7 @@ async fn handle_accept(
             *errors += 1;
             on_event(Event::Warn(format!("порт {port}: не удалось принять соединение: {e}")));
             if *errors >= MAX_ACCEPT_ERRORS {
-                return Err(anyhow::anyhow!("порт {port}: приём соединений не восстанавливается подряд уже {MAX_ACCEPT_ERRORS} раз: {e}"));
+                common::code_bail!(1602, "порт {port}: приём соединений не восстанавливается подряд уже {MAX_ACCEPT_ERRORS} раз: {e}");
             }
             tokio::time::sleep(ACCEPT_ERROR_PAUSE).await;
             Ok(())

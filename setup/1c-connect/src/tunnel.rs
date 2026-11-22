@@ -240,7 +240,7 @@ pub async fn run(
                     let (n, give_up) = forward_refusal_step(&cfg.host.workstation, forward_refusals);
                     forward_refusals = n;
                     if let Some(text) = give_up {
-                        return Err(anyhow::anyhow!(text));
+                        return Err(anyhow::Error::msg(common::code::say(1603, text)));
                     }
                 } else {
                     forward_refusals = 0;

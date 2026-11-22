@@ -307,7 +307,6 @@ mod tests {
         "1c-connect/src/listen.rs",
         "1c-connect/src/local.rs",
         "1c-connect/src/main.rs",
-        "1c-connect/src/ops_host.rs",
         "1c-connect/src/platform.rs",
         "1c-connect/src/project.rs",
         "1c-connect/src/publication.rs",

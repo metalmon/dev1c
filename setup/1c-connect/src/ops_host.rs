@@ -383,10 +383,10 @@ impl Op<Ctx> for Tools {
             return Ok(());
         }
         let o = docker::probe(ctx, &oscript_exe(&from).to_string_lossy(), &["-version"])?;
-        anyhow::ensure!(o.ok(), "oscript не запускается из {}: {}", from.display(), o.tail(2).join(" "));
+        common::code_ensure!(o.ok(), 1401, "oscript не запускается из {}: {}", from.display(), o.tail(2).join(" "));
         ctx.ok(format!("oscript {}", o.text.trim()));
         let o = docker::probe(ctx, &git_exe(&from).to_string_lossy(), &["--version"])?;
-        anyhow::ensure!(o.ok(), "git не запускается из {}: {}", from.display(), o.tail(2).join(" "));
+        common::code_ensure!(o.ok(), 1402, "git не запускается из {}: {}", from.display(), o.tail(2).join(" "));
         ctx.ok(o.text.trim().to_string());
         if cfg!(windows) {
             // Тень учебной платформы — не копия комплекта, а несколько
@@ -543,8 +543,15 @@ fn starter_locations() -> Vec<PathBuf> {
 /// (`platform::resolve`). Переменная `ONEC_PLATFORM` стоит выше лестницы и
 /// разбирается здесь: она называет каталог с исполняемым файлом, а не
 /// версию, и в списке установленного её может не быть вовсе.
+///
+/// Номер отказа ставится ЗДЕСЬ, а не в `platform_report` и не в
+/// `platform::resolve`: этой дверью ходят ворота (`gate::gate_now`), и до
+/// разметки причина платформы была единственной причиной ворот без номера —
+/// человек диктовал по телефону слова, а не число. Отчёт «Проверить» ходит
+/// `platform_report`, и у его факта номер свой (`verify::platform_fact`,
+/// 1503): второе число про то же место там было бы лишним.
 pub fn platform_choice(cfg: &crate::cfg::Cfg) -> Result<crate::platform::Choice, String> {
-    platform_report(cfg).0
+    platform_report(cfg).0.map_err(|e| common::code::say(1403, e))
 }
 
 /// То же и заодно **другие** установленные версии — то, что факт проверки
@@ -648,8 +655,12 @@ pub fn display_wrapper() -> Option<PathBuf> {
 /// Текст отказа до запуска Конфигуратора: экрана нет и дать его нечем.
 /// Чистая функция — состояние машины ей называет вызывающий.
 pub fn no_screen(has_display: bool, xvfb: Option<&Path>) -> Option<String> {
-    (cfg!(target_os = "linux") && !has_display && xvfb.is_none())
-        .then(|| format!("нет экрана для Конфигуратора: DISPLAY не задан (или за ним нет X-сервера), xvfb-run не найден — {SCREEN_HINT}"))
+    (cfg!(target_os = "linux") && !has_display && xvfb.is_none()).then(|| {
+        common::code::say(
+            1404,
+            format!("нет экрана для Конфигуратора: DISPLAY не задан (или за ним нет X-сервера), xvfb-run не найден — {SCREEN_HINT}"),
+        )
+    })
 }
 
 /// Отказ от имени коннектора вместо сырого «Unable to initialize GTK+…» через
@@ -722,7 +733,7 @@ fn display_argv(program: &str, args: &[&str], xvfb: Option<&Path>) -> (String, V
 fn link_or_copy(src: &Path, dst: &Path) -> Result<(), String> {
     let _ = std::fs::remove_file(dst);
     if std::fs::hard_link(src, dst).is_err() {
-        std::fs::copy(src, dst).map_err(|e| format!("копирование {} в {}: {e}", src.display(), dst.display()))?;
+        std::fs::copy(src, dst).map_err(|e| common::code::say(1405, format!("копирование {} в {}: {e}", src.display(), dst.display())))?;
     }
     Ok(())
 }
@@ -732,8 +743,8 @@ fn link_or_copy(src: &Path, dst: &Path) -> Result<(), String> {
 /// дополнительные ссылки под именами `1cv8.exe`/`1cv8c.exe`. У платформы в bin
 /// есть подкаталоги с ресурсами (CEF, конфигурация) — без них она не стартует.
 fn shadow_tree(src: &Path, dst: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(dst).map_err(|e| format!("каталог {} не создан: {e}", dst.display()))?;
-    let entries = std::fs::read_dir(src).map_err(|e| format!("каталог {} не читается: {e}", src.display()))?;
+    std::fs::create_dir_all(dst).map_err(|e| common::code::say(1406, format!("каталог {} не создан: {e}", dst.display())))?;
+    let entries = std::fs::read_dir(src).map_err(|e| common::code::say(1407, format!("каталог {} не читается: {e}", src.display())))?;
     for e in entries.filter_map(|e| e.ok()) {
         let Ok(file_type) = e.file_type() else { continue };
         let name = e.file_name();
@@ -771,7 +782,9 @@ pub fn shadow_platform(platform: &Path, to: &Path) -> Result<PathBuf, String> {
     if bin.join("1cv8.exe").exists() {
         return Ok(platform.to_path_buf());
     }
-    let version = platform.file_name().ok_or_else(|| format!("путь {} не похож на каталог версии платформы", platform.display()))?;
+    let version = platform
+        .file_name()
+        .ok_or_else(|| common::code::say(1408, format!("путь {} не похож на каталог версии платформы", platform.display())))?;
     let shadow_dir = to.join("platform").join(version);
     shadow_tree(&bin, &shadow_dir.join("bin"))?;
     Ok(shadow_dir)
@@ -793,16 +806,16 @@ fn read_1cestart_cfg(cfg_path: &Path) -> Result<String, String> {
     let bytes = match std::fs::read(cfg_path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
-        Err(e) => return Err(format!("{} не читается: {e}", cfg_path.display())),
+        Err(e) => return Err(common::code::say(1409, format!("{} не читается: {e}", cfg_path.display()))),
     };
     if bytes.is_empty() {
         return Ok(String::new());
     }
     if bytes.len() < 2 || bytes[0..2] != UTF16_BOM {
-        return Err(format!("{} не похож на список версий 1С (ожидался BOM UTF-16LE)", cfg_path.display()));
+        return Err(common::code::say(1410, format!("{} не похож на список версий 1С (ожидался BOM UTF-16LE)", cfg_path.display())));
     }
     if (bytes.len() - 2) % 2 != 0 {
-        return Err(format!("{} повреждён (нечётное число байт)", cfg_path.display()));
+        return Err(common::code::say(1411, format!("{} повреждён (нечётное число байт)", cfg_path.display())));
     }
     let units: Vec<u16> = bytes[2..].as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
     Ok(String::from_utf16_lossy(&units))
@@ -812,13 +825,13 @@ fn read_1cestart_cfg(cfg_path: &Path) -> Result<String, String> {
 /// лаунчер 1С сам пишет этот файл.
 fn write_1cestart_cfg(cfg_path: &Path, text: &str) -> Result<(), String> {
     if let Some(parent) = cfg_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("каталог {} не создан: {e}", parent.display()))?;
+        std::fs::create_dir_all(parent).map_err(|e| common::code::say(1412, format!("каталог {} не создан: {e}", parent.display())))?;
     }
     let mut bytes = UTF16_BOM.to_vec();
     for u in text.encode_utf16() {
         bytes.extend_from_slice(&u.to_le_bytes());
     }
-    std::fs::write(cfg_path, bytes).map_err(|e| format!("{} не записан: {e}", cfg_path.display()))
+    std::fs::write(cfg_path, bytes).map_err(|e| common::code::say(1413, format!("{} не записан: {e}", cfg_path.display())))
 }
 
 /// Добавляет `InstalledLocation=<location>` в файл лаунчера, если такой строки
@@ -1103,7 +1116,7 @@ fn env_line(mode: &str, server: &str) -> Result<String> {
         return Ok("среда: база рядом, адрес не нужен".into());
     }
     let addr: std::result::Result<Vec<_>, _> = std::net::ToSocketAddrs::to_socket_addrs(server).map(|a| a.collect());
-    anyhow::ensure!(addr.is_ok(), "адрес среды {server} не разбирается — проверьте server в 1c-connect.toml");
+    common::code_ensure!(addr.is_ok(), 1414, "адрес среды {server} не разбирается — проверьте server в 1c-connect.toml");
     Ok(format!("среда: {server}"))
 }
 
@@ -1127,12 +1140,12 @@ impl Op<Ctx> for Env {
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         match find_1cv8(&ctx.cfg) {
             Some(p) => ctx.ok(format!("платформа: {}", p.display())),
-            None => anyhow::bail!("платформа 1С не найдена — установите её или укажите переменную ONEC_PLATFORM"),
+            None => common::code_bail!(1415, "платформа 1С не найдена — установите её или укажите переменную ONEC_PLATFORM"),
         }
         let exe = mcp_exe(&ctx.kit);
-        anyhow::ensure!(exe.exists(), "в комплекте нет {} — комплект неполный", exe.display());
+        common::code_ensure!(exe.exists(), 1416, "в комплекте нет {} — комплект неполный", exe.display());
         let o = docker::probe(ctx, &exe.to_string_lossy(), &["--version"])?;
-        anyhow::ensure!(o.ok(), "mcp-1c не запускается: {}", o.tail(2).join(" "));
+        common::code_ensure!(o.ok(), 1417, "mcp-1c не запускается: {}", o.tail(2).join(" "));
         ctx.ok(o.text.trim().to_string());
         ctx.ok(env_line(&ctx.cfg.host.mode, &ctx.cfg.host.server)?);
         Ok(())
@@ -1193,7 +1206,10 @@ impl Op<Ctx> for ProjectOp {
             return Ok(());
         }
         let p = crate::project::Project::from_cfg(&ctx.cfg, &ctx.kit.root);
-        crate::project::init(&p, &ctx.kit.root, &analyzer_lines(&ctx.cfg), &|s| ctx.ok(s)).map_err(|e| anyhow::anyhow!("{e}"))
+        // `Error::msg`, а не свой текст: отказ `project::init` уже несёт свой
+        // номер, и второе число про то же место было бы лишним. Так же везде
+        // ниже, где отказ приходит строкой из соседнего модуля.
+        crate::project::init(&p, &ctx.kit.root, &analyzer_lines(&ctx.cfg), &|s| ctx.ok(s)).map_err(anyhow::Error::msg)
     }
     // uninstall leaves the project alone: it is the person's work.
 }
@@ -1204,7 +1220,7 @@ impl Op<Ctx> for ProjectOp {
 /// `ensure_publication` (serve/окно — сервис живёт вместе с вызвавшим
 /// процессом).
 fn raise_publication(ctx: &Ctx, lifetime: crate::publication::Lifetime) -> Result<()> {
-    let p = crate::publication::Paths::of(&ctx.cfg, &ctx.kit).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let p = crate::publication::Paths::of(&ctx.cfg, &ctx.kit).map_err(anyhow::Error::msg)?;
     // Разовая команда (Detached — «Установить», headless install), нашедшая
     // уже отвечающий и верно настроенный сервис, его не трогает: он уже у
     // кого-то на привязи (этот же процесс как WithCaller, живое окно, serve
@@ -1222,13 +1238,13 @@ fn raise_publication(ctx: &Ctx, lifetime: crate::publication::Lifetime) -> Resul
     // Дескриптор несёт пароль базы — в журнал не идёт, только в файл, и
     // только с правами на владельца (образ делит диск между рабочими
     // местами).
-    crate::publication::write_vrd(&p.pub_dir, &crate::publication::vrd(&ctx.cfg)).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let conf_text = crate::publication::httpd_conf(&p).map_err(|e| anyhow::anyhow!("{e}"))?;
-    std::fs::write(&p.conf, conf_text).context("httpd.conf не записан")?;
+    crate::publication::write_vrd(&p.pub_dir, &crate::publication::vrd(&ctx.cfg)).map_err(anyhow::Error::msg)?;
+    let conf_text = crate::publication::httpd_conf(&p).map_err(anyhow::Error::msg)?;
+    std::fs::write(&p.conf, conf_text).context(common::code::say(1423, "httpd.conf не записан"))?;
     // start() идемпотентен сам по себе (перезапускает уже поднятый сервис
     // поверх новой конфигурации) — второй вызов после смены пароля или базы
     // не падает на «порт занят».
-    crate::publication::start(&p, lifetime).map_err(|e| anyhow::anyhow!("{e}"))?;
+    crate::publication::start(&p, lifetime).map_err(anyhow::Error::msg)?;
     ctx.ok(format!("HTTP-сервис базы поднят на 127.0.0.1:{}", p.port));
     Ok(())
 }
@@ -1414,7 +1430,9 @@ pub fn run_mcp(server: McpServer, kit: Kit) -> Result<()> {
     // (см. тот же вызов в `main.rs::connect`).
     crate::project::set_lock_target(kit.state());
     if let Some(why) = crate::gate::gate_now(&kit, &cfg) {
-        anyhow::bail!("{why}");
+        // Причина ворот уже пришла с номером (своим или чужого факта) — здесь
+        // только доносим её, не нумеруя второй раз.
+        return Err(anyhow::Error::msg(why));
     }
     let log = cmd_log_sink(&kit);
     let live = crate::session::Live::new(cfg.clone());
@@ -1431,10 +1449,13 @@ pub fn run_mcp(server: McpServer, kit: Kit) -> Result<()> {
         // что и у `serve`), а паника задачи моста не должна молча кончаться
         // `exit 0` — редактор увидел бы мгновенно умерший сервер без единого
         // слова (ревью задачи 3, Minor 6).
-        let task = serve
-            .dispatch(port, stdio)
-            .ok_or_else(|| anyhow::anyhow!("порт {port} не обслуживается мостом — внутренняя ошибка (server и ports разошлись)"))?;
-        task.await.map_err(|e| anyhow::anyhow!("мост 1c-connect упал: {e}"))?;
+        let task = serve.dispatch(port, stdio).ok_or_else(|| {
+            anyhow::Error::msg(common::code::say(
+                1418,
+                format!("порт {port} не обслуживается мостом — внутренняя ошибка (server и ports разошлись)"),
+            ))
+        })?;
+        task.await.map_err(|e| anyhow::Error::msg(common::code::say(1419, format!("мост 1c-connect упал: {e}"))))?;
         Ok(())
     })
 }
@@ -1485,7 +1506,7 @@ pub fn leave_own_publication(ctx: &Ctx) -> Result<bool> {
         return Ok(false);
     };
     Publication.revert_apply(ctx, CleanLevel::Stack)?;
-    crate::publication::remove_descriptor(&p.pub_dir).context("дескриптор публикации не удалён")?;
+    crate::publication::remove_descriptor(&p.pub_dir).context(common::code::say(1424, "дескриптор публикации не удалён"))?;
     ctx.ok("дескриптор нашей публикации убран: базу публикует веб-сервер");
     Ok(true)
 }
@@ -1562,8 +1583,8 @@ impl Op<Ctx> for Publication {
         if ctx.cfg.host.publication == "webserver" {
             return Ok(());
         }
-        let p = crate::publication::Paths::of(&ctx.cfg, &ctx.kit).map_err(|e| anyhow::anyhow!("{e}"))?;
-        crate::publication::stop(&p).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let p = crate::publication::Paths::of(&ctx.cfg, &ctx.kit).map_err(anyhow::Error::msg)?;
+        crate::publication::stop(&p).map_err(anyhow::Error::msg)?;
         // Наш сервис точно остановлен (stop() это гарантирует) — если порт
         // всё равно занят, там чужая программа: не наша ошибка, а информация.
         if crate::publication::httpd_responds(p.port) {
@@ -1614,7 +1635,7 @@ impl Op<Ctx> for Extension {
         // нет и дать его нечем — отказ словами и сразу, а не сырой GTK-текст
         // через минуту ожидания.
         if !ctx.dry_run {
-            screen_check().map_err(|e| anyhow::anyhow!("{e}"))?;
+            screen_check().map_err(anyhow::Error::msg)?;
         }
         let exe = mcp_exe(&ctx.kit);
         let h = &ctx.cfg.host;
@@ -1628,7 +1649,7 @@ impl Op<Ctx> for Extension {
         let o = docker::exec(ctx, &prog, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
         // Хвост вывода идёт в журнал окна и в 1c-connect.log: пароль базы из
         // аргументов, если команда его эхом вернула, затирается.
-        anyhow::ensure!(o.ok(), "расширение не установилось: {}", docker::redact_text(&o.tail(4).join(" ")));
+        common::code_ensure!(o.ok(), 1420, "расширение не установилось: {}", docker::redact_text(&o.tail(4).join(" ")));
         ctx.ok("расширение установлено");
         if ctx.dry_run {
             return Ok(());
@@ -1655,9 +1676,9 @@ impl Op<Ctx> for Extension {
     fn revert_apply(&self, ctx: &Ctx, _level: CleanLevel) -> Result<()> {
         ctx.progress(Phase::Uninstall);
         if !ctx.dry_run {
-            screen_check().map_err(|e| anyhow::anyhow!("{e}"))?;
+            screen_check().map_err(anyhow::Error::msg)?;
         }
-        let Some(v8) = find_1cv8(&ctx.cfg) else { anyhow::bail!("1cv8.exe не найден") };
+        let Some(v8) = find_1cv8(&ctx.cfg) else { common::code_bail!(1421, "1cv8.exe не найден") };
         let h = &ctx.cfg.host;
         let ib = ib_switch(&h.base_path);
         let n = format!("/N{}", h.db_user);
@@ -1666,7 +1687,7 @@ impl Op<Ctx> for Extension {
         // Снятие расширения — тот же Конфигуратор, та же нужда в экране.
         let (prog, args) = display_argv(&v8.to_string_lossy(), &args, display_wrapper().as_deref());
         let o = docker::exec(ctx, &prog, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
-        anyhow::ensure!(o.ok(), "конфигуратор не снял расширение: {}", docker::redact_text(&o.tail(3).join(" ")));
+        common::code_ensure!(o.ok(), 1422, "конфигуратор не снял расширение: {}", docker::redact_text(&o.tail(3).join(" ")));
         let _ = std::fs::remove_file(ctx.kit.state_path("known_hosts"));
         ctx.ok("расширение снято, отпечаток сервера забыт");
         Ok(())
@@ -2116,6 +2137,53 @@ mod tests {
         assert!(env_line("local", "").unwrap().contains("рядом"));
         assert!(env_line("tunnel", "").is_err(), "в туннеле адрес обязателен");
         assert_eq!(env_line("tunnel", "192.168.1.10:3393").unwrap(), "среда: 192.168.1.10:3393");
+    }
+
+    /// Отказ операции несёт свой номер — то, что человек диктует по телефону.
+    ///
+    /// Точки входа из брифа (`run_mcp_for_test_without_kit`) в крейте нет:
+    /// берём `env_line` — отказ шага «Окружение», достижимый без 1С, без
+    /// комплекта и без сети.
+    #[test]
+    fn an_operation_refusal_says_its_number() {
+        let e = env_line("tunnel", "").unwrap_err().to_string();
+        assert!(common::code::split(&e).0.is_some_and(|c| c / 100 == 14), "{e}");
+    }
+
+    /// Причина отказа платформы доезжает до ворот С НОМЕРОМ.
+    ///
+    /// Это была единственная причина ворот без номера: `platform_choice`
+    /// отдавала строку через `format!`, сторож её не видел, и подвал окна
+    /// показывал человеку слова без числа. Номер ставит сама `platform_choice`
+    /// — дверь ворот; `platform_report` (дверь отчёта «Проверить») остаётся
+    /// без него: там у факта свой номер (1503), и второе число про то же место
+    /// было бы лишним.
+    #[test]
+    fn the_platform_reason_reaches_the_gate_with_a_number() {
+        // Переменная `ONEC_PLATFORM` перекрывает лестницу целиком — при ней
+        // выбор может оказаться удачным, и проверять было бы нечего.
+        if std::env::var_os(ONEC_PLATFORM).is_some() {
+            return;
+        }
+        let mut cfg = crate::cfg::filled_for_test();
+        // Такой версии нет ни при какой установке 1С.
+        cfg.host.platform = "0.0".into();
+        let why = platform_choice(&cfg).expect_err("версии 0.0 на машине нет");
+        assert!(common::code::split(&why).0.is_some_and(|c| c / 100 == 14), "{why}");
+        assert_eq!(common::code::split(&platform_report(&cfg).0.unwrap_err()).0, None, "у отчёта свой номер факта");
+        // Ворота несут причину как есть — вместе с номером: `gui::panel::gate_text`
+        // вынимает его из этой самой строки через `code::split`.
+        let gate = crate::gate::cold_gate(
+            &cfg,
+            true,
+            true,
+            &OpState::Done("vrunner 3.0.2".into()),
+            Err(why.as_str()),
+            true,
+            &crate::licence::State::Valid,
+        )
+        .expect("отказ платформы запирает переключатель");
+        assert_eq!(common::code::split(&gate), common::code::split(&why), "{gate}");
     }
 
     /// Адрес среды выводится только там, где вывод верен. В локальном режиме

@@ -249,6 +249,11 @@ mod tests {
         // Сетевой путь — предупреждение проверки, но не замок.
         c.host.base_path = "\\\\nas\\bases\\buh".into();
         assert_eq!(cold_gate(&c, true, false, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Valid), None);
+        // Порт кластера — законная часть серверного адреса (`cfg::is_server_base`,
+        // находка владельца 26.10). Отказ живого прогона: окно не пускало к
+        // `сервер:1541\база` словами «каталога базы … нет».
+        c.host.base_path = "srv-1c:1541\\buh".into();
+        assert_eq!(cold_gate(&c, true, false, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Valid), None);
     }
 
     /// Пустое поле объясняется словами, а не пустой строкой в середине фразы.

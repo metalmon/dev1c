@@ -84,6 +84,12 @@ pub struct Panel {
     /// Подбор уже отложен до конца кадра: второй обмер в том же кадре его
     /// не дублирует.
     fit_queued: bool,
+    /// Базы из списка 1С (`platform::bases`): имя, как его показывает
+    /// запускатель, и строка базы. Читается один раз, на создании окна: файл
+    /// лежит на диске, а отрисовка идёт десятки раз в секунду. База, заведённая
+    /// в 1С при открытом окне, появится в списке после перезапуска программы —
+    /// ponytail: перечитывать на открытии меню, если это начнут замечать.
+    bases: Vec<(String, String)>,
 }
 
 /// Карточка состояния: кружок, заголовок, можно ли «Прервать» — всегда одна
@@ -763,6 +769,35 @@ fn pick_face() -> (Option<&'static str>, &'static str) {
     (None, "Выбрать…")
 }
 
+/// Сколько знаков пути остаётся в строке меню выбора базы. Подобрано под
+/// ширину окна (`window::MIN_SIZE.width` — 380 px): с именем базы впереди это
+/// примерно вся строка.
+const PATH_IN_MENU: usize = 36;
+
+/// Длинный путь для строки меню — с выеденной серединой: `C:\Users\buc…\Buh`.
+/// Голова называет диск и начало, хвост — саму базу, а это и есть то, чем
+/// похожие базы различаются (две «Информационные базы» в списке 1С — обычное
+/// дело, имя по умолчанию человек не меняет).
+///
+/// Режем по знакам, а не по байтам: пути бывают кириллические
+/// («C:\1cbase\ТЕСТ УНФ проф»), и середина байтовой строки попадает в середину
+/// буквы.
+fn short_path(path: &str, max: usize) -> String {
+    let chars: Vec<char> = path.chars().collect();
+    if chars.len() <= max || max < 3 {
+        return path.to_string();
+    }
+    // Хвост длиннее головы: имя базы важнее начала пути.
+    let keep = max - 1;
+    let tail = keep * 2 / 3;
+    let head = keep - tail;
+    format!(
+        "{}…{}",
+        chars[..head].iter().collect::<String>(),
+        chars[chars.len() - tail..].iter().collect::<String>()
+    )
+}
+
 fn field(ph: &str, val: &str, masked: bool, window: &mut Window, cx: &mut Context<Panel>) -> Entity<InputState> {
     let (ph, val) = (ph.to_string(), val.to_string());
     cx.new(|cx| {
@@ -796,7 +831,10 @@ impl Panel {
         let fields = Fields {
             server: field("192.168.1.10:3393", &host.server, false, window, cx),
             password: field("пароль рабочего места", &host.password, true, window, cx),
-            base_path: field("C:\\Bases\\Buh", &host.base_path, false, window, cx),
+            // Подсказка называет обе формы: один файловый путь учил людей, что
+            // сюда пишут только каталог, и клиент-серверную базу писать было
+            // неоткуда — 1С её одной строкой нигде не показывает.
+            base_path: field("C:\\Bases\\Buh или srv-1c\\buh", &host.base_path, false, window, cx),
             db_user: field("Администратор", &host.db_user, false, window, cx),
             db_password: field("пароль", &host.db_password, true, window, cx),
             project: field("C:\\proj\\Buh", &host.project, false, window, cx),
@@ -819,6 +857,7 @@ impl Panel {
             params_h: None,
             last_fit: None,
             fit_queued: false,
+            bases: crate::platform::bases(),
         }
     }
 
@@ -1232,6 +1271,58 @@ impl Render for Panel {
                 .tooltip(tooltip)
                 .on_click(cx.listener(move |this, _, _, cx| this.pick_dir(target.clone(), cx)))
         };
+
+        // У поля «База» за той же кнопкой — список баз самой 1С
+        // (`platform::bases`, файл `ibases.v8i`): человек выбирает имя, которое
+        // видит в запускателе, а строку подключения собираем мы.
+        //
+        // Писать её руками он не умеет, и не по своей вине: диалог 1С
+        // «Добавление информационной базы» формы `сервер\база` не показывает
+        // нигде — он спрашивает кластер и имя базы двумя разными полями
+        // (находка владельца по живому прогону: «не могут подключиться к
+        // сетевой базе»). Выбор папки остаётся последним пунктом — для
+        // файловой базы, которой в списке 1С нет.
+        let bases = self.bases.clone();
+        let pick_base = |target: Entity<InputState>, _cx: &mut Context<Self>| {
+            let (_, tooltip) = pick_face();
+            let folder = target.clone();
+            Button::new("pick-base")
+                .outline()
+                .icon(Icon::default().data(FOLDER_SVG))
+                .tooltip(tooltip)
+                .dropdown_menu(move |menu, _, _| {
+                    // Меню не шире окна (`MIN_SIZE.width` — ширина у него
+                    // постоянная) и не выше трёх четвертей его высоты: у
+                    // человека баз бывает два десятка, и по умолчанию меню
+                    // рисовалось бы и шире окна (500 px), и во весь экран.
+                    // Что не влезло — прокручивается.
+                    let mut menu = menu
+                        .max_w(crate::gui::window::MIN_SIZE.width - px(24.))
+                        .max_h(crate::gui::window::MIN_SIZE.height * 0.75)
+                        .scrollable(true);
+                    for (name, path) in bases.iter() {
+                        let (text, target) = (path.clone(), target.clone());
+                        // Имя — как в запускателе, строка — та, что ляжет в
+                        // поле: человек видит обе и не гадает, что выбрал.
+                        // Длинный путь — с выеденной серединой (`short_path`):
+                        // целиком он в окно не влезает.
+                        let label = format!("{name} — {}", short_path(path, PATH_IN_MENU));
+                        menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                            let (text, target) = (text.clone(), target.clone());
+                            target.update(cx, |s, cx| s.set_value(text, window, cx));
+                        }));
+                    }
+                    if !bases.is_empty() {
+                        menu = menu.separator();
+                    }
+                    let folder = folder.clone();
+                    menu.item(PopupMenuItem::new("Указать папку…").on_click(move |_, _, cx| {
+                        let Some(panel) = cx.global::<Ui>().panel.clone() else { return };
+                        let folder = folder.clone();
+                        panel.update(cx, |this, cx| this.pick_dir(folder, cx));
+                    }))
+                })
+        };
         let f = &self.fields;
 
         let body: AnyElement = match tab {
@@ -1275,7 +1366,7 @@ impl Render for Panel {
                                 .gap_2()
                                 .items_center()
                                 .child(div().flex_1().child(Self::input(&f.base_path, accent, window, cx)))
-                                .child(pick("pick-base", f.base_path.clone(), cx)),
+                                .child(pick_base(f.base_path.clone(), cx)),
                         ),
                     )
                     // Адрес чужой публикации — сразу под базой, к которой он
@@ -1655,8 +1746,8 @@ impl Render for Panel {
 mod tests {
     use super::{
         adopt_needed, can_save, card, fact_rows, fields_differ, foot_left_text, op_question, pick_face, project_facts, project_menu,
-        project_rows, reason, save_hint, shown_base_url, shown_fields, switch_locked, switch_tooltip, window_radius, ProjectMenu,
-        FOOT_LINE, FOOT_LINES,
+        project_rows, reason, save_hint, short_path, shown_base_url, shown_fields, switch_locked, switch_tooltip, window_radius,
+        ProjectMenu, FOOT_LINE, FOOT_LINES, PATH_IN_MENU,
     };
     use crate::cfg::Host;
     use crate::gui::{Dot, Kind, Line, ProjectView, Running, Verdict, Which};
@@ -1666,6 +1757,26 @@ mod tests {
     use common::Phase;
     use gpui_kit::px;
     use std::time::{Duration, Instant};
+
+    /// Строка меню выбора базы: короткий путь остаётся собой, длинный теряет
+    /// середину, но не концы — по хвосту человек и узнаёт базу. Кириллица
+    /// режется по буквам, а не по байтам.
+    #[test]
+    fn a_long_path_loses_its_middle_and_keeps_both_ends() {
+        let short = "C:\\Bases\\UNF";
+        assert_eq!(short_path(short, PATH_IN_MENU), short);
+
+        let long = "C:\\Users\\bucher\\Documents\\InfoBase\\Бухгалтерия";
+        let cut = short_path(long, PATH_IN_MENU);
+        assert_eq!(cut.chars().count(), PATH_IN_MENU, "{cut}");
+        assert!(cut.starts_with("C:\\Users"), "{cut}");
+        assert!(cut.ends_with("Бухгалтерия"), "{cut}");
+        assert!(cut.contains('…'), "{cut}");
+
+        // Резать по байтам кириллицу нельзя — проверка на то, что строка цела.
+        let cyr = "C:\\1cbase\\ТЕСТ УНФ проф\\очень длинное имя базы";
+        assert_eq!(short_path(cyr, 20).chars().count(), 20);
+    }
 
     /// Задача 7: вкладка показывает тот же набор и ничего своего — ни отбора,
     /// ни добавок, ни пересказа. Один факт — одна строка, в порядке набора.

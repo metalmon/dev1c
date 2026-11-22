@@ -85,9 +85,11 @@ pub fn matches_mask(version: &str, mask: &str) -> bool {
 /// считаются: один и тот же каталог человек пишет и так, и иначе.
 fn connect_key(base_path: &str) -> String {
     let p = base_path.trim().trim_end_matches(['\\', '/']);
-    // Та же классификация, что у `ops_host::ib_switch`: `сервер\база` — это
-    // путь с обратной косой и без двоеточия диска.
-    if p.contains('\\') && !p.contains(':') {
+    // Та же классификация, что у `ops_host::ib_switch`, и из того же
+    // единственного места: прежняя копия здесь решала по двоеточию, и база с
+    // портом кластера (`сервер:1541\база`) не находила своей строки в списке —
+    // пин версии молча терялся.
+    if crate::cfg::is_server_base(p) {
         if let Some((srv, re)) = p.rsplit_once('\\') {
             return format!("srv:{}/{}", srv.to_lowercase(), re.to_lowercase());
         }
@@ -95,21 +97,83 @@ fn connect_key(base_path: &str) -> String {
     format!("file:{}", p.replace('\\', "/").to_lowercase())
 }
 
-/// То же из значения `Connect=` строки списка баз:
-/// `File="C:\Bases\Buh";` или `Srvr="srv-1c";Ref="buh";`.
-fn connect_key_of_value(value: &str) -> Option<String> {
-    let field = |name: &str| -> Option<String> {
-        let at = value.find(name)?;
-        let rest = &value[at + name.len()..];
-        let rest = rest.trim_start().strip_prefix('=')?.trim_start();
-        let inner = rest.strip_prefix('"')?;
-        Some(inner[..inner.find('"')?].to_string())
-    };
-    if let Some(file) = field("File") {
-        return Some(connect_key(&file));
+/// Значение поля строки подключения: `File="C:\Bases\Buh";`, `Srvr="srv-1c";`,
+/// `Ref="buh";`.
+fn connect_field(value: &str, name: &str) -> Option<String> {
+    let at = value.find(name)?;
+    let rest = &value[at + name.len()..];
+    let rest = rest.trim_start().strip_prefix('=')?.trim_start();
+    let inner = rest.strip_prefix('"')?;
+    Some(inner[..inner.find('"')?].to_string())
+}
+
+/// База из значения `Connect=` строки списка баз — в той самой форме, какую
+/// программа держит в поле «База» (`host.base_path`): файловой это путь,
+/// клиент-серверной — `сервер\база` (`Srvr` может нести и порт кластера:
+/// `srv-1c:1541`).
+///
+/// Отсюда же берёт её выбор базы из списка 1С (`bases_in`): человек выбирает
+/// имя, которое видит в запускателе, а строку собираем мы. Сам он этой формы
+/// нигде в 1С не видит — диалог «Добавление информационной базы» спрашивает
+/// кластер и имя базы двумя разными полями.
+pub fn base_path_of_value(value: &str) -> Option<String> {
+    if let Some(file) = connect_field(value, "File") {
+        return Some(file.trim().to_string());
     }
-    let (srv, re) = (field("Srvr")?, field("Ref")?);
-    Some(format!("srv:{}/{}", srv.trim().to_lowercase(), re.trim().to_lowercase()))
+    let (srv, re) = (connect_field(value, "Srvr")?, connect_field(value, "Ref")?);
+    let (srv, re) = (srv.trim(), re.trim());
+    if srv.is_empty() || re.is_empty() {
+        return None;
+    }
+    Some(format!("{srv}\\{re}"))
+}
+
+/// То же из значения `Connect=` строки списка баз — в сравнимом виде.
+fn connect_key_of_value(value: &str) -> Option<String> {
+    Some(connect_key(&base_path_of_value(value)?))
+}
+
+/// Базы из списка 1С: имя секции, как его показывает запускатель, и строка
+/// базы в нашей форме. Разбор тот же, что у пина версии (`base_pin`), — файл
+/// один и тот же, и второго разбора ему не нужно.
+pub fn bases_in(v8i: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut name: Option<String> = None;
+    for line in v8i.trim_start_matches('\u{feff}').lines() {
+        let t = line.trim();
+        if let Some(inner) = t.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            name = Some(inner.trim().to_string());
+            continue;
+        }
+        let Some((k, v)) = t.split_once('=') else { continue };
+        if !k.trim().eq_ignore_ascii_case("Connect") {
+            continue;
+        }
+        // Секция без имени — не показываем: выбирать человеку нечего.
+        if let (Some(n), Some(p)) = (name.clone(), base_path_of_value(v)) {
+            if !n.is_empty() {
+                out.push((n, p));
+            }
+        }
+    }
+    out
+}
+
+/// Базы из всех списков, какие есть у 1С на этой машине (`starter_dirs` —
+/// пользовательский файл раньше общего). Одна и та же база в двух файлах
+/// показывается один раз: сравниваем тем же ключом, что и пин версии.
+pub fn bases() -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for dir in starter_dirs() {
+        let Some(text) = read_1c_text(&dir.join("ibases.v8i")) else { continue };
+        for (name, path) in bases_in(&text) {
+            let key = connect_key(&path);
+            if !out.iter().any(|(_, p)| connect_key(p) == key) {
+                out.push((name, path));
+            }
+        }
+    }
+    out
 }
 
 /// Пин версии для **нашей** базы из текста `ibases.v8i`: ищем её строку по
@@ -236,14 +300,23 @@ fn starter_cfg_name() -> &'static str {
 }
 
 /// Каталоги лаунчера в порядке старшинства: пользовательский раньше общего.
-/// У учебной платформы свой лаунчер и свой каталог (`1cestartt`), поэтому
-/// смотрим оба — какая платформа выбрана, выяснится уже по пинам.
+/// У учебной платформы свой лаунчер и свой каталог (`1CEStartt` на Windows,
+/// `1cestartt` на Linux), поэтому смотрим оба — какая платформа выбрана,
+/// выяснится уже по пинам.
+///
+/// Учебный каталог знала только линуксовая половина, и на Windows базы
+/// учебной платформы не находились вовсе: ни в списке для выбора
+/// (`bases`), ни пином версии (`base_pin`). Живой прогон 22.11: в окне
+/// запускателя три базы, в нашем списке — две, и пропала как раз та,
+/// клиент-серверная, которую человек только что завёл.
 fn starter_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if cfg!(windows) {
         for var in ["APPDATA", "PROGRAMDATA"] {
             if let Some(base) = std::env::var_os(var) {
-                dirs.push(PathBuf::from(base).join("1C").join("1CEStart"));
+                for name in ["1CEStart", "1CEStartt"] {
+                    dirs.push(PathBuf::from(&base).join("1C").join(name));
+                }
             }
         }
     } else if let Some(home) = std::env::var_os("HOME") {
@@ -373,6 +446,53 @@ mod tests {
     #[test]
     fn base_pin_matches_a_server_base() {
         assert_eq!(base_pin(V8I, "srv-1c\\wh").as_deref(), Some("8.3.27.1508"));
+    }
+
+    /// База с портом кластера — та же серверная: пин ищется по тому же
+    /// единственному правилу (`cfg::is_server_base`). Прежняя копия здесь
+    /// решала по двоеточию, относила такую базу к файловым, и пин молча
+    /// терялся.
+    #[test]
+    fn base_pin_matches_a_server_base_with_a_cluster_port() {
+        let v8i = "\u{feff}[Склад]\r\nConnect=Srvr=\"srv-1c:1541\";Ref=\"wh\";\r\nVersion=8.3.27.1508\r\n";
+        assert_eq!(base_pin(v8i, "srv-1c:1541\\wh").as_deref(), Some("8.3.27.1508"));
+    }
+
+    /// У учебной платформы свой каталог запускателя, и базы в нём — такие же
+    /// базы человека. Прежде его знала только линуксовая половина: на Windows
+    /// учебные базы не попадали ни в список выбора, ни в пин версии.
+    #[test]
+    fn the_training_launcher_is_looked_at_on_both_systems() {
+        let dirs = starter_dirs();
+        let ends = |s: &str| dirs.iter().any(|d| d.ends_with(s));
+        if dirs.is_empty() {
+            return; // ни HOME, ни APPDATA — спрашивать не у кого
+        }
+        if cfg!(windows) {
+            assert!(ends("1CEStart") && ends("1CEStartt"), "{dirs:?}");
+        } else {
+            assert!(ends("1cestart") && ends("1cestartt"), "{dirs:?}");
+        }
+    }
+
+    /// Список баз человека — именами, какие он видит в запускателе 1С, и
+    /// строкой базы в нашей форме. Собирать её руками ему больше не надо:
+    /// диалог 1С этой формы не показывает вовсе.
+    #[test]
+    fn the_list_of_bases_speaks_the_names_the_starter_shows() {
+        assert_eq!(
+            bases_in(V8I),
+            vec![
+                ("Бухгалтерия".to_string(), "C:\\Bases\\Buh".to_string()),
+                ("Демо".to_string(), "/home/dev1/base".to_string()),
+                ("Склад".to_string(), "SRV-1C\\wh".to_string()),
+            ]
+        );
+        // Порт кластера остаётся в адресе сервера, а не теряется по дороге.
+        let v8i = "\u{feff}[Склад]\r\nConnect=Srvr=\"srv-1c:1541\";Ref=\"wh\";\r\n";
+        assert_eq!(bases_in(v8i), vec![("Склад".to_string(), "srv-1c:1541\\wh".to_string())]);
+        // Строка без имени секции и секция без `Connect=` показывать нечего.
+        assert!(bases_in("Connect=File=\"C:\\x\";\r\n[Пусто]\r\nID=7\r\n").is_empty());
     }
 
     #[test]

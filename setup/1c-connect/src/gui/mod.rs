@@ -2314,8 +2314,10 @@ mod doom {
     /// ведёт к выходу»: расходиться им было нечем, но именно так этот разряд дефектов и заводится. `exit_code_for` снята.
     pub(super) fn refuse(why: &str, kit: Option<&Kit>) -> ! {
         match refusal_road(crate::holder::place_for_a_window(), kit) {
+            // Рамка — не своя: её складывает `journal::stopped`, одна на все три дороги и на консоль набранной команды (`main`).
+            // Двух формулировок одного события у программы не бывает — закон окна, раздел «Журнал».
             RefusalRoad::OsMessage => {
-                fatal(&format!("Остановлено: {why}"));
+                fatal(&crate::journal::stopped(why));
                 std::process::exit(1)
             }
             // Слова и код считает бек — и считает их ОДИН раз на все поводы: `no_place_for_a_window` зовут только отсюда,
@@ -2324,7 +2326,7 @@ mod doom {
             // Журнала нет, консоли у оконного запуска нет — но `stderr` у входа по ssh настоящий, и молчать в него было бы тем
             // самым «занял место окна молча». Форма строки та же, что у журнала (`Kind::mark`) — см. `say_aloud`.
             RefusalRoad::Stderr => {
-                eprintln!("{:<2}Остановлено: {why}", Kind::Fail.mark());
+                eprintln!("{:<2}{}", Kind::Fail.mark(), crate::journal::stopped(why));
                 std::process::exit(1)
             }
         }

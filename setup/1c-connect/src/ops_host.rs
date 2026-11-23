@@ -3679,11 +3679,12 @@ mod tests {
         assert!(enabled.load(Ordering::Relaxed));
         assert_eq!(live.get().1.access(), "read_write", "файл годный — читается как есть");
 
-        // Файл ломается (пустой base_path не проходит validate()), но
+        // Файл ломается (путь с «..» не проходит validate(); пустой путь с
+        // 23.11 законен — полнота ушла к делу, `Connection::validate`), но
         // write в нём — точное "read_write": единственное, чему здесь
         // можно довериться. Прежнее значение (уже "read_write") остаётся
         // нетронутым, не форсируется заново.
-        write_cfg("", "read_write");
+        write_cfg("C:\\Bases\\..\\Buh", "read_write");
         std::thread::sleep(std::time::Duration::from_millis(500));
         assert_eq!(live.get().1.access(), "read_write", "точное совпадение — прежнее значение сохраняется");
         assert_eq!(live.get().1.current().base_path, "C:\\Bases\\Buh", "остальные поля — прежний годный Cfg, не битый новый");

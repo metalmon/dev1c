@@ -1870,11 +1870,12 @@ mod tests {
     fn mcp_command_guarded_refuses_without_building_a_command_when_publication_is_not_up() {
         let dir = std::env::temp_dir().join(format!("dev1c-bridge-guard-not-up-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        // Порт, который только что был свободен (его выбрала сама ОС) — и
-        // pid-файла в каталоге состояния нет и не было: ровно `NotPublished`.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        // Порт, на котором заведомо никто не слушает, — из тестового
+        // диапазона (`ports::test_port`), а не отпущенный эфемерный: тот
+        // успевал достаться соседнему тесту этого же бинарника, публикация
+        // внезапно «отвечала», и падал не тот, кто виноват. pid-файла в
+        // каталоге состояния нет и не было: ровно `NotPublished`.
+        let port = crate::ports::test_port();
         let mut cfg = crate::cfg::filled_for_test();
         cfg.current_mut().publication = "auto".into();
         cfg.current_mut().http_port = Some(port);

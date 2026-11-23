@@ -401,10 +401,15 @@ mod tests {
     /// (`lock()` above, even on the `dry_run` branch), keyed by `Fake`'s fixed
     /// `dir` — cargo runs this module's tests in parallel in one binary, so
     /// any overlap on that same folder makes the loser see «занято» and
-    /// panic on `.unwrap()`. One mutex serialises them; production code is
-    /// untouched.
-    fn serial() -> std::sync::MutexGuard<'static, ()> {
-        crate::project::TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+    /// panic on `.unwrap()`.
+    ///
+    /// Сторож тот же самый, что у тестов `project.rs` и `verify.rs`
+    /// (`project::test_lock`), а не свой: ресурс один — замок проекта, и
+    /// второй сторож на тот же ресурс как раз и не видел бы первого. Цели
+    /// (`LOCK_TARGET`) этим тестам не нужно — замок им хватает в памяти,
+    /// отсюда `None`.
+    fn serial() -> crate::project::TestLock {
+        crate::project::test_lock(None)
     }
 
     #[test]

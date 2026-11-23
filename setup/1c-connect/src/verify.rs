@@ -2811,7 +2811,7 @@ mod tests {
     /// пробы: замок ЭТОЙ папки держит именно она.
     #[test]
     fn evidence_reports_busy_while_the_project_lock_is_held() {
-        let _serial = crate::project::TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::project::test_lock(None);
         let dir = std::env::temp_dir().join(format!("onec-evidence-busy-{}", std::process::id()));
         let held = crate::project::hold("project_push", &dir).unwrap_or_else(|e| panic!("{e}"));
         match runner_evidence(&dir) {
@@ -2834,11 +2834,11 @@ mod tests {
     /// глобальная отметка (`bridge::RUNNER_REPLY`) к этому моменту может уже
     /// быть выставлена — полагаться на её чистоту здесь нечестно. Мьютекс
     /// проекта настоящий (`busy_now`): его в этом тесте никто не держит, а
-    /// `TEST_SERIAL`, как у соседнего теста, не даёт двум проверкам реального
-    /// замка папки (`project::hold`/`BUSY`) идти параллельно.
+    /// `project::test_lock`, как у соседнего теста, не даёт двум проверкам
+    /// реального замка папки (`project::hold`/`BUSY`) идти параллельно.
     #[test]
     fn the_runner_is_never_cold_started_for_a_fact() {
-        let _serial = crate::project::TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::project::test_lock(None);
         let dir = std::env::temp_dir().join(format!("onec-cold-start-{}", std::process::id()));
         let ev = evidence_from(busy_now(&dir), None);
         assert_eq!(ev, None, "мьютекс свободен, а мост «молчит» — ровно то условие, которое раньше поднимало пробу");
@@ -2855,11 +2855,10 @@ mod tests {
     /// памяти этого процесса вовсе, — `busy_now` обязан увидеть занятость через межпроцессную часть.
     #[test]
     fn busy_now_sees_a_cross_process_file_lock_too() {
-        let _serial = crate::project::TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let state = std::env::temp_dir().join(format!("onec-busy-now-file-lock-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&state);
         std::fs::create_dir_all(&state).unwrap();
-        crate::project::set_lock_target(&state);
+        let _lock = crate::project::test_lock(Some(&state));
         // Папка проекта — отдельная от каталога состояния; путь файла замка
         // строится той же `lock_file_path`, что берёт сам `hold` (круг
         // починки задачи 7, находка 2 — одно место на имя, не вторая копия).
@@ -2870,7 +2869,6 @@ mod tests {
         assert_eq!(busy_now(&project).as_deref(), Some("другая операция"), "файл занят соседним процессом — должно быть видно отсюда");
         drop(other);
         assert_eq!(busy_now(&project), None, "файл отпущен — снова свободно");
-        crate::project::clear_lock_target_for_test();
         let _ = std::fs::remove_dir_all(&state);
     }
 

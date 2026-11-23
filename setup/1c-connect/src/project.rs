@@ -617,13 +617,63 @@ pub(crate) fn lock_file_path(state: &Path, dir: &Path) -> PathBuf {
 /// та же болезнь, что лечим снаружи, только внутри процесса.
 static BUSY: std::sync::LazyLock<Mutex<HashMap<String, String>>> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Тестовый серилизатор: cargo гоняет тесты в одном бинарнике параллельно,
-/// а `BUSY`/`LOCK_TARGET` — глобалы на процесс. Берётся первым во всех
-/// тестах этого файла и `flow.rs`, что держат или оспаривают замок папки
-/// либо делят общую `LOCK_TARGET`, — иначе сосед получает «занято» и падает
+/// Взятый на время теста замок проекта — серилизатор И цель
+/// (`LOCK_TARGET`) одним предметом, потому что вопрос у них один: «кто
+/// сейчас распоряжается замком проекта в этом процессе». cargo гоняет тесты
+/// одного бинарника параллельно, а `BUSY`/`LOCK_TARGET` — глобалы на
+/// процесс: без этого замка сосед читает чужую занятость как свою и падает
 /// на `.unwrap()`.
+///
+/// **Почему RAII, а не `set_lock_target` плюс снятие в конце теста.** Снятие
+/// руками не случается, когда тест ПАДАЕТ, — и цель уезжала следующим
+/// тестам, которые на неё не рассчитывали
+/// (`without_a_target_the_lock_is_in_memory_only` читал чужую цель как
+/// свою). Это и есть разряд «падает не тот, кто виноват»: 22.11 вместе с
+/// одним настоящим отказом покраснели три теста про замки. `Drop` случается
+/// и на панике, так что утечь цели больше нечем.
+///
+/// **Ловушка отравленного замка.** Упавший тест отравляет мьютекс
+/// (`PoisonError`), и `unwrap()` у СЛЕДУЮЩЕГО превратил бы один отказ в
+/// лавину отказов по соседям. Поэтому `unwrap_or_else(|e| e.into_inner())`:
+/// под замком нет данных (`Mutex<()>`), восстанавливать нечего, испортиться
+/// нечему. Вторая ловушка — у зовущего, и её не видно глазами: держать
+/// сторож надо ИМЕНОВАННОЙ переменной (`let _lock = test_lock(…)`), а не
+/// `let _ = test_lock(…)` — второе роняет его той же строкой, и
+/// серилизации не остаётся вовсе.
+///
+/// **Это замок ровно на ОДИН ресурс — замок проекта.** Порты
+/// (`ports::test_port`) и управляющая дверь (`door::tests::test_door`) —
+/// другие ресурсы машины, и у них свои механизмы: общий сторож на всё
+/// выстроил бы тысячу с лишним тестов в одну очередь.
 #[cfg(test)]
-pub(crate) static TEST_SERIAL: Mutex<()> = Mutex::new(());
+pub(crate) struct TestLock {
+    _serial: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for TestLock {
+    fn drop(&mut self) {
+        // Цель снимается РАНЬШЕ, чем отпускается серилизатор: поле дропается
+        // после тела `drop`, и следующий тест не успеет застать чужую цель.
+        *LOCK_TARGET.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+/// Взять замок проекта на время теста. `target` — каталог состояния для
+/// межпроцессной (файловой) половины замка; `None` — тест смотрит только на
+/// память (`BUSY`), как разовые команды продукта, которые цели не ставят.
+///
+/// Следующему автору: тест, который держит или оспаривает замок папки
+/// (`hold`, `hold_read`, `doing`, `folder_busy`, `file_lock_busy`, `busy_now`
+/// у `verify`) либо ставит цель, обязан начинаться этой строкой. Своего
+/// `set_lock_target` в тестах больше нет — цель ставится только отсюда.
+#[cfg(test)]
+pub(crate) fn test_lock(target: Option<&Path>) -> TestLock {
+    static SERIAL: Mutex<()> = Mutex::new(());
+    let serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    *LOCK_TARGET.lock().unwrap_or_else(|e| e.into_inner()) = target.map(Path::to_path_buf);
+    TestLock { _serial: serial }
+}
 
 /// Что сейчас идёт в этой папке под замком (пусто — ничего). Ключ тот же,
 /// что строит и берёт сам замок (`lock_key`) — иначе имя могло бы разойтись
@@ -659,16 +709,6 @@ static LOCK_TARGET: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 pub fn set_lock_target(dir: &Path) {
     *LOCK_TARGET.lock().unwrap_or_else(|e| e.into_inner()) = Some(dir.to_path_buf());
-}
-
-/// Снять цель — глобал на процесс, и тест, поставивший её, обязан не
-/// оставить её следующему (тот же приём, что уже был у соседних тестов
-/// этого файла: `without_a_target_the_lock_is_in_memory_only` рассчитывает
-/// на `None`). Открыт тестам другого модуля (`verify::tests`) — `LOCK_TARGET`
-/// им не виден вовсе.
-#[cfg(test)]
-pub(crate) fn clear_lock_target_for_test() {
-    *LOCK_TARGET.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// Замок проекта, пережививший второй процесс: обёртка над приёмом из
@@ -1032,7 +1072,7 @@ mod tests {
 
     #[test]
     fn a_panic_inside_a_tool_does_not_jam_the_project_forever() {
-        let _s = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = test_lock(None);
         let (_t, p) = fixture();
         let _ = std::thread::spawn(|| {
             let _g = BUSY.lock().unwrap();
@@ -1340,7 +1380,7 @@ mod tests {
 
     #[test]
     fn second_caller_is_told_busy_not_queued() {
-        let _s = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = test_lock(None);
         let (_t, p) = fixture();
         let guard = hold("project_push", &p.dir).unwrap();
         let (text, err) = call(&p, "project_status", &Value::Null);
@@ -1363,16 +1403,14 @@ mod tests {
 
     #[test]
     fn a_busy_lock_names_what_is_running() {
-        let _s = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let d = tempdir::Dir::new();
-        set_lock_target(d.path());
+        // Цель снимет сам сторож, в том числе если тест упадёт: ручное
+        // снятие в конце теста её и утекало соседям (см. `test_lock`).
+        let _lock = test_lock(Some(d.path()));
         let (_t, p) = fixture();
         let g = hold("project_push", &p.dir).unwrap();
         assert_eq!(hold("project_status", &p.dir).err(), Some("занято: идёт project_push".to_string()));
         drop(g);
-        // Цель — глобал на процесс: следующий тест её не должен застать —
-        // ставит её только сам (`without_a_target_the_lock_is_in_memory_only`).
-        *LOCK_TARGET.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// Наблюдение владельца 30.10: «я только включил, какой project_status?».
@@ -1382,7 +1420,7 @@ mod tests {
     /// человеку имя инструмента, которого тот не звал.
     #[test]
     fn a_read_does_not_announce_itself_as_an_operation() {
-        let _s = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = test_lock(None);
         let (_t, p) = fixture();
         let g = hold_read(&p.dir).unwrap();
         assert_eq!(doing(&p.dir), "", "чтение не вправе объявлять себя операцией");
@@ -1397,7 +1435,7 @@ mod tests {
     #[test]
     fn without_a_target_the_lock_is_in_memory_only() {
         // Разовые команды (`status`, `example`) цели не ставят: отказа быть не должно.
-        let _s = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = test_lock(None);
         let (_t, p) = fixture();
         let _g = hold("project_status", &p.dir).unwrap();
     }
@@ -1413,7 +1451,7 @@ mod tests {
     /// системного мьютекса предел ~255-260 знаков) и пустая папка.
     #[test]
     fn two_cyrillic_folders_do_not_share_a_lock_key() {
-        let _s = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = test_lock(None);
         let (a, b) = (Path::new(r"C:\работа\аптека"), Path::new(r"C:\работа\склады"));
         assert_ne!(lock_key(a), lock_key(b), "разные папки — разные ключи замка");
         // Разное написание ОДНОЙ папки — по-прежнему один ключ: нормализует
@@ -1453,7 +1491,7 @@ mod tests {
     }
 
     /// Та же гарантия, но на межпроцессном слое и под настоящей целью
-    /// (`set_lock_target`): круг починки задачи 7, находка 3 — до этого оба
+    /// (`test_lock(Some(…))`): круг починки задачи 7, находка 3 — до этого оба
     /// новых теста доказывали только слой памяти (`BUSY`, через `hold`), а
     /// дисковый слой, тот самый, где имя строилось дважды (находка 2), не
     /// проверял никто. Берём файл A напрямую, как бы его держал ЧУЖОЙ
@@ -1461,9 +1499,8 @@ mod tests {
     /// что `hold` на папке A честно отказывает, а на папке B проходит.
     #[test]
     fn two_projects_on_disk_do_not_block_each_other() {
-        let _s = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let state = tempdir::Dir::new();
-        set_lock_target(state.path());
+        let _lock = test_lock(Some(state.path()));
         let (_ta, pa) = fixture();
         let (_tb, pb) = fixture();
         let other = file_lock(&lock_file_path(state.path(), &pa.dir)).unwrap().expect("файл папки A свободен в начале теста");
@@ -1472,7 +1509,6 @@ mod tests {
         drop(g);
         drop(other);
         assert!(hold("project_push", &pa.dir).is_ok(), "файл отпущен — папка A снова свободна");
-        clear_lock_target_for_test();
     }
 
     /// Та же гарантия, но через настоящую поверхность (`call`, та же, что у
@@ -1482,7 +1518,7 @@ mod tests {
     /// делит их по папке, а не по машине.
     #[test]
     fn two_projects_do_not_block_each_other() {
-        let _s = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = test_lock(None);
         let (_ta, pa) = fixture();
         let (_tb, pb) = fixture();
         let guard = hold("project_push", &pa.dir).unwrap();

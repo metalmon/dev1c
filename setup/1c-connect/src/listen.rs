@@ -302,17 +302,23 @@ mod tests {
         }
     }
 
-    /// Порт 0 — пусть ОС выберет сама и тут же вернёт выбранный номер;
-    /// короткий зонд-и-отпустить не трогает 777x/778x вовсе и не привязан к
-    /// рабочим местам — коллизия с живым коннектором на машине исключена.
-    fn ephemeral_port() -> u16 {
-        std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port()
-    }
-
+    /// Пара портов на один сеанс — из единственного в крейте источника
+    /// тестовых портов (`ports::test_port`).
+    ///
+    /// Прежде здесь стоял свой «зонд-и-отпустить»: `bind(:0)`, запомнить
+    /// номер, отпустить — и дальше считать номер своим. Это был ВТОРОЙ ответ
+    /// на тот же вопрос, и неверный: номер приходил из эфемерного диапазона,
+    /// то есть ровно оттуда, откуда ядро раздаёт порты и под `bind(:0)`
+    /// соседнего теста, и под исходящие соединения. Между «отпустили» и
+    /// «заняли сами» порт успевал достаться соседу — и падал не тот, кто
+    /// виноват (замеры 22-23.11: `a_busy_port_fails_the_whole_session…` и
+    /// `a_port_held_on_ipv6_only…` краснели по очереди, а по отдельности
+    /// проходили все).
+    ///
     /// `Ports` не `Clone` — `Serve` и `run()` каждый берут свой экземпляр,
     /// построенный из одних и тех же чисел.
-    fn ephemeral_ports() -> (u16, u16) {
-        (ephemeral_port(), ephemeral_port())
+    fn test_ports() -> (u16, u16) {
+        (crate::ports::test_port(), crate::ports::test_port())
     }
 
     /// `Kit` без настоящего комплекта: бинарей mcp-1c/vrunner в нём нет —
@@ -335,7 +341,7 @@ mod tests {
     #[tokio::test]
     async fn both_listeners_come_up_and_a_connection_reaches_the_bridge() {
         let cfg = crate::cfg::filled_for_test();
-        let (mcp_port, vrunner_port) = ephemeral_ports();
+        let (mcp_port, vrunner_port) = test_ports();
         let (kit, dir) = fake_kit();
         let (bridge_log, bridge_seen) = recording_sink();
         let serve_ports = Ports { mcp: mcp_port, vrunner: vrunner_port, web: 0 };
@@ -406,7 +412,7 @@ mod tests {
     /// мы обязаны только на `AddrInUse`, то есть когда порт правда занят.
     #[tokio::test]
     async fn no_ipv6_on_the_machine_is_not_a_failure() {
-        let port = ephemeral_port();
+        let port = crate::ports::test_port();
         let (v4, _v6) = bind_loopback(port).await.expect("IPv4 свободен — этого достаточно");
         assert_eq!(v4.local_addr().unwrap().port(), port);
     }
@@ -414,7 +420,7 @@ mod tests {
     #[tokio::test]
     async fn a_busy_port_fails_the_whole_session_and_frees_the_first_listener() {
         let cfg = crate::cfg::filled_for_test();
-        let (mcp_port, vrunner_port) = ephemeral_ports();
+        let (mcp_port, vrunner_port) = test_ports();
         let (kit, dir) = fake_kit();
         let serve_ports = Ports { mcp: mcp_port, vrunner: vrunner_port, web: 0 };
         let serve = Arc::new(Serve::new(&cfg, &kit, Arc::new(|_: Event| {}), serve_ports, Arc::new(AtomicBool::new(true))));
@@ -447,8 +453,12 @@ mod tests {
         assert!(text.starts_with(&format!("порт {port} занят процессом ")) && text.contains("pid "), "{text}");
         drop(held);
 
-        // Держателя не видно — ни слова о том, чей он и жив ли.
-        let free = ephemeral_port();
+        // Держателя не видно — ни слова о том, чей он и жив ли. Номер из
+        // тестового диапазона (`ports::test_port`), а не отпущенный
+        // эфемерный: отпущенный успевал достаться соседнему тесту, и
+        // держатель внезапно становился виден — ровно та неустойчивость,
+        // из-за которой падал не тот, кто виноват.
+        let free = crate::ports::test_port();
         let text = busy_port_text(free, &in_use);
         assert_eq!(text, format!("порт {free} занят, кем — не видно"));
         assert!(!text.contains("другим процессом"), "{text}");
@@ -461,7 +471,7 @@ mod tests {
     #[tokio::test]
     async fn stop_closes_accepted_connections() {
         let cfg = crate::cfg::filled_for_test();
-        let (mcp_port, vrunner_port) = ephemeral_ports();
+        let (mcp_port, vrunner_port) = test_ports();
         let (kit, dir) = fake_kit();
         let serve_ports = Ports { mcp: mcp_port, vrunner: vrunner_port, web: 0 };
         let serve = Arc::new(Serve::new(&cfg, &kit, Arc::new(|_: Event| {}), serve_ports, Arc::new(AtomicBool::new(true))));
@@ -499,7 +509,7 @@ mod tests {
     #[tokio::test]
     async fn a_broken_kit_answers_every_request_with_a_refusal_and_keeps_the_connection_open() {
         let cfg = crate::cfg::filled_for_test();
-        let (mcp_port, vrunner_port) = ephemeral_ports();
+        let (mcp_port, vrunner_port) = test_ports();
         let (kit, dir) = fake_kit();
         let serve_ports = Ports { mcp: mcp_port, vrunner: vrunner_port, web: 0 };
         let serve = Arc::new(Serve::new(&cfg, &kit, Arc::new(|_: Event| {}), serve_ports, Arc::new(AtomicBool::new(true))));

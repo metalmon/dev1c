@@ -601,10 +601,16 @@ impl Drop for OffOnExit<'_> {
 /// Необязательным этот список не бывает: зовущих здесь двое, `connect` и `serve`, и дверь держат оба, значит показать заявку умеют
 /// оба. Поднять узел и уронить пришедшую заявку молча — не поведение, а недоделка: уронённый канал значит для разговора «человек не
 /// решил», и та сторона получает это вместо вопроса человеку.
-fn peer_wiring(ctx: &Ctx, requests: &enroll::Requests) -> (peer::Peer, session::Wiring) {
+///
+/// `Err` — ключ этой машины не открылся, и подкоманда на этом кончается: без своей личности она не умеет ни сопрягаться, ни звонить,
+/// ни ответить второй стороне (довод целиком в `peer::start`). Слова печатает `main` — «Остановлено: …», — и код уходит ненулевой.
+fn peer_wiring(ctx: &Ctx, requests: &enroll::Requests) -> anyhow::Result<(peer::Peer, session::Wiring)> {
     let serving = session::Serving::default();
     let (out_tx, mut out_rx) = futures::channel::mpsc::unbounded::<peer_out::Out>();
-    let node = peer::start(&ctx.kit, out_tx, serving.clone());
+    // Ключ этой машины не открылся — подкоманда отказывает словами и ненулевым
+    // кодом (`main` печатает «Остановлено: …»), а не живёт без личности: довод
+    // в докстроке `peer::start`, дорога у окна та же (`gui::doom::refuse`).
+    let node = peer::start(&ctx.kit, out_tx, serving.clone()).map_err(|e| anyhow::anyhow!(e))?;
     let (kit, sink, requests) = (ctx.kit.clone(), ctx.sink.clone(), requests.clone());
     std::thread::spawn(move || {
         futures::executor::block_on(async move {
@@ -639,7 +645,7 @@ fn peer_wiring(ctx: &Ctx, requests: &enroll::Requests) -> (peer::Peer, session::
         let (node, card) = (node.clone(), ctx.cfg.current().id().clone());
         Arc::new(move |kind, stream| node.calls(&card, kind, stream))
     };
-    (node, session::Wiring { serving, to_channel, ports: None })
+    Ok((node, session::Wiring { serving, to_channel, ports: None }))
 }
 
 /// Туннель плюс мост, пока не нажмут Ctrl+C или сеанс не упадёт сам.
@@ -686,7 +692,7 @@ fn connect(ctx: &Ctx) -> Result<()> {
     println!("Соединение «{}»; порты {} (mcp-1c) и {} (веб-клиент). Ctrl+C — отключиться.", ctx.cfg.current().name, ports.mcp, ports.web);
     // Узел держится до конца функции, а не до конца проводки — см. докстроку `peer_wiring`.
     let requests = enroll::Requests::default();
-    let (_node, wiring) = peer_wiring(ctx, &requests);
+    let (_node, wiring) = peer_wiring(ctx, &requests)?;
     // Дверь `connect` не только рассказывает, но и ДЕЛАЕТ — тем же исполнителем, что у `serve` и у окна (`door::serves`): клиенты у
     // двери одни, и держит её `connect` с задачи 14 наравне с ними. Без этой строки набранные `code`, `dial` и `requests` читали бы
     // «узел ещё не поднялся» при живом и работающем узле — то есть дверь была бы открыта и пуста.
@@ -815,7 +821,7 @@ fn serve(ctx: &Ctx) -> Result<()> {
     }
     // Узел держится до конца функции, а не до конца проводки — см. докстроку `peer_wiring`.
     let requests = enroll::Requests::default();
-    let (_node, wiring) = peer_wiring(ctx, &requests);
+    let (_node, wiring) = peer_wiring(ctx, &requests)?;
     // Дверь учится ДЕЛАТЬ, а не только рассказывать: `code` и `dial` с этой машины идут к ЭТОМУ узлу (задача 6 плана). Решает за неё
     // бек целиком (`door::serves`) — тот же самый, что ставит себе окно, потому что клиенты у двери одни.
     door.answers(door::serves(ctx.kit.clone(), _node.clone(), one_c_connect::codes::Codes::default(), requests));

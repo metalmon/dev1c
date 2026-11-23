@@ -251,6 +251,26 @@ fn a_tray_icon_that_came_up_does_not_lead_to_the_exit() {
     assert!(arm.contains("refuse("), "выход по отказу значка стоит внутри ветви `Err` — иначе он задел бы и удавшийся значок");
 }
 
+/// Совет «работайте подкомандой» живёт у ТЕХ ДВУХ поводов, которым он верен, и больше ни у кого.
+///
+/// Вторая половина сторожа на встречу текстов: дорога отказа про обходную подкоманду молчит (это держит
+/// `journal::tests::a_refusal_never_denies_and_recommends_serve_in_one_breath`), и если бы совет при этом нигде не стоял, человек
+/// на отказе значка остался бы вовсе без выхода. Поводов, которые `serve` правда переживает, двое — значок и оконная система, — и
+/// проверяются здесь оба; остальным трём (замок, ключ узла, поиск комплекта) `serve` не помогает, и приписать им его нечем.
+#[test]
+fn only_the_refusals_that_serve_survives_point_at_it() {
+    const MOD: &str = include_str!("mod.rs");
+    const WINDOW: &str = include_str!("window.rs");
+    let advice = "journal::SERVE_INSTEAD_OF_A_WINDOW";
+    let from = MOD.find("if start.tray_is_vital() {").expect("смертельный отказ значка на месте");
+    let arm = &MOD[from..from + MOD[from..].find("\n            }").expect("конец ветви на месте")];
+    assert!(arm.contains(advice), "отказ значка обязан назвать дорогу в обход окна: {arm}");
+    let from = WINDOW.find("Err(e) => super::refuse(").expect("отказ оконной системы на месте");
+    // Ветвь в одну строку (так её ставит `rustfmt`): конец — перевод строки.
+    let arm = &WINDOW[from..from + WINDOW[from..].find('\n').expect("конец ветви на месте")];
+    assert!(arm.contains(advice), "отказ оконной системы — тоже: {arm}");
+}
+
 /// Ключ узла не открылся — подъём КОНЧАЕТСЯ, и кончается он общей дорогой отказа, а не строкой в журнале.
 ///
 /// Что сторожится и почему именно так. Решение «нет ключа — нет подъёма» держит тип: `peer::start` отдаёт `Result`, и забыть его

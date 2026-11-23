@@ -269,7 +269,7 @@ fn from_file(store: &crate::secrets::Store, path: &Path, text: &str) -> Result<S
 /// на этой ветви порядок действий, а не вердикт: сперва обычный сеанс (ничего
 /// не теряется), и лишь если и там не открылось — переезд комплекта с его
 /// ценой. Обратный порядок стоил бы человеку зачислений на догадке.
-fn foreign_key_words(network_logon: bool, path: &Path) -> String {
+pub(crate) fn foreign_key_words(network_logon: bool, path: &Path) -> String {
     if network_logon {
         return format!(
             "Ключ этой машины в этом сеансе не открывается.\nФайл {} прочитан, но содержимое его не расшифровалось — а вход в этот сеанс \

@@ -858,14 +858,22 @@ fn profile_for_configuration_name(name: &str) -> &'static str {
 /// человека то, что можно узнать (решение владельца 24.11).
 ///
 /// `1cv8 DESIGNER … /DumpConfigToFiles <каталог> -configDumpInfoOnly` пишет в
-/// каталог ОДИН файл `ConfigDumpInfo.xml` вместо всей выгрузки — замер 24.11
-/// на пустой базе: код возврата 0, две секунды, один файл. Полная выгрузка
-/// той же дорогой стоила бы минуты и сотни мегабайт, и ставить её перед
-/// каждой установкой было бы нельзя.
+/// каталог ОДИН файл `ConfigDumpInfo.xml` вместо всей выгрузки. Замер ведущего
+/// 24.11 на настоящей УНФ: код возврата 0, в файле
+/// `Configuration.УправлениеНебольшойФирмойУчебная`. Полная выгрузка той же
+/// дорогой стоила бы минуты и сотни мегабайт, и ставить её перед каждой
+/// установкой было бы нельзя.
 ///
-/// Форма вызова — та же, что у `revert_apply` ниже (`/N`, `/P` после ключа
-/// операции, экран через `display_argv`): у Конфигуратора в этом дереве одна
-/// проверенная форма, и вторую заводить незачем.
+/// **Цена всё равно не нулевая: тем же замером файл вышел 23 МБ** — он
+/// перечисляет ВСЕ объекты метаданных, а не только корень, который нам нужен.
+/// Поэтому каталог заводится `fsperm::PrivateDir` и убирается им же в любом
+/// исходе, отказ и панику включая: оставлять по 23 МБ во временном каталоге за
+/// каждую попытку установки нельзя.
+///
+/// Учётные данные — ровно те же, что у `revert_apply` ниже, и тем же
+/// `designer_auth`: без `/N` база с пользователями отвечает отказом (так и
+/// выглядел мой первый замер 24.11 — код 1 с пустым журналом, потому что
+/// проверял я на пустой базе, где пользователей нет вовсе).
 ///
 /// `None` на любом отказе — не беда и не молчание: решение принимает
 /// `install_profile`, и на `None` он отказывает словами, называя поле и
@@ -875,18 +883,22 @@ fn profile_for_configuration_name(name: &str) -> &'static str {
 fn configuration_name(ctx: &Ctx) -> Option<String> {
     let v8 = find_1cv8(&ctx.cfg)?;
     let h = ctx.cfg.current();
-    let dir = std::env::temp_dir().join(format!("1c-connect-dumpinfo-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).ok()?;
+    let dir = match common::fsperm::PrivateDir::new("1c-connect-dumpinfo") {
+        Ok(d) => d,
+        Err(e) => {
+            ctx.warn(format!("вид конфигурации не определён — каталог для выгрузки не заведён: {e}"));
+            return None;
+        }
+    };
     let ib = ib_switch(&h.base_path);
-    let n = format!("/N{}", h.db_user);
-    let p = format!("/P{}", h.db_password);
-    let out = dir.to_string_lossy().into_owned();
-    let args = ["DESIGNER", &ib, "/DisableStartupDialogs", "/DumpConfigToFiles", &out, "-configDumpInfoOnly", &n, &p];
-    let (prog, args) = display_argv(&v8.to_string_lossy(), &args, display_wrapper().as_deref());
+    let out = dir.path().to_string_lossy().into_owned();
+    let mut args = vec!["DESIGNER".to_string(), ib, "/DisableStartupDialogs".to_string()];
+    args.extend(["/DumpConfigToFiles".to_string(), out, "-configDumpInfoOnly".to_string()]);
+    args.extend(designer_auth(h));
+    let (prog, args) =
+        display_argv(&v8.to_string_lossy(), &args.iter().map(String::as_str).collect::<Vec<_>>(), display_wrapper().as_deref());
     let run = proc::exec(ctx, &prog, &args.iter().map(String::as_str).collect::<Vec<_>>());
-    let xml = std::fs::read_to_string(dir.join("ConfigDumpInfo.xml"));
-    let _ = std::fs::remove_dir_all(&dir);
+    let xml = std::fs::read_to_string(dir.path().join("ConfigDumpInfo.xml"));
     match (run, xml) {
         (Ok(o), Ok(xml)) if o.ok() => configuration_name_in_dump_info(&xml).map(str::to_string),
         (Ok(o), _) => {
@@ -898,6 +910,32 @@ fn configuration_name(ctx: &Ctx) -> Option<String> {
             None
         }
     }
+}
+
+/// Учётные данные базы для Конфигуратора — ЕДИНСТВЕННОЕ место, которое их
+/// собирает: и чтение имени конфигурации (`configuration_name`), и снятие
+/// расширения (`Extension::revert_apply`) берут их здесь.
+///
+/// **Пустой пароль задаётся ОТСУТСТВИЕМ ключа `/P`, а не `/P` с пустым
+/// значением** — замер ведущего 24.11: `/P ''` даёт код возврата 0 и пустой
+/// каталог, потому что пустая строка до платформы не доезжает и `/P` забирает
+/// себе СЛЕДУЮЩИЙ аргумент — ключ операции уезжает в пароль, и Конфигуратор
+/// честно делает не то, о чём просили, молча. Пустое имя пользователя — то же
+/// правило: ключа нет вовсе.
+///
+/// `/P` остаётся ключом (а не переменной окружения или файлом) по той же
+/// причине, что и раньше: другого способа отдать пароль платформе 1С нет. В
+/// журнал строка как есть не идёт — `proc::redact_text` затирает `/P…`
+/// построчно.
+fn designer_auth(h: &crate::cfg::Connection) -> Vec<String> {
+    let mut out = Vec::new();
+    if !h.db_user.is_empty() {
+        out.push(format!("/N{}", h.db_user));
+    }
+    if !h.db_password.is_empty() {
+        out.push(format!("/P{}", h.db_password));
+    }
+    out
 }
 
 /// Имя конфигурации из `ConfigDumpInfo.xml`: первая запись выгрузки — корень,
@@ -2299,13 +2337,21 @@ impl Op<Ctx> for Extension {
         }
         let Some(v8) = find_1cv8(&ctx.cfg) else { anyhow::bail!("1cv8.exe не найден") };
         let h = ctx.cfg.current();
-        let ib = ib_switch(&h.base_path);
-        let n = format!("/N{}", h.db_user);
-        // `/P` остаётся ключом Конфигуратору — у платформы 1С другого способа отдать ей пароль нет (ни переменной окружения, ни файла); это первое из двух честных исключений задачи 5 — второе у `install_command` (установщик `mcp-1c`, по той же причине: не выбор удобства, а единственный способ, которым он умеет принимать пароль). Сама строка в журнал не идёт как есть: `proc::redact_text` затирает `/P…` построчно, прежде чем что-то попадёт в лог.
-        let p = format!("/P{}", h.db_password);
-        let args = ["DESIGNER", &ib, "/DisableStartupDialogs", "/DeleteCfg", "-Extension", "MCP_HTTPService", &n, &p];
+        // Учётные данные — через `designer_auth`: пустой пароль там задаётся
+        // отсутствием ключа `/P`, а не пустым значением (замер ведущего
+        // 24.11, см. её докстроку — там же и про то, почему пароль у
+        // Конфигуратора вообще ключ). Прежде эта строка собирала `/P`
+        // безусловно, и на учебной базе с пустым паролем ключ уезжал пустым:
+        // здесь он стоял последним и съесть было нечего, но форма всё равно
+        // неверная, а вторая её копия рядом (`configuration_name`) была бы
+        // ровно той «второй мерой на один вопрос», от которой это дерево и
+        // страдает.
+        let mut args = vec!["DESIGNER".to_string(), ib_switch(&h.base_path), "/DisableStartupDialogs".to_string()];
+        args.extend(["/DeleteCfg".to_string(), "-Extension".to_string(), "MCP_HTTPService".to_string()]);
+        args.extend(designer_auth(h));
         // Снятие расширения — тот же Конфигуратор, та же нужда в экране.
-        let (prog, args) = display_argv(&v8.to_string_lossy(), &args, display_wrapper().as_deref());
+        let (prog, args) =
+            display_argv(&v8.to_string_lossy(), &args.iter().map(String::as_str).collect::<Vec<_>>(), display_wrapper().as_deref());
         let o = proc::exec(ctx, &prog, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
         anyhow::ensure!(o.ok(), "конфигуратор не снял расширение: {}", proc::redact_text(&o.tail(3).join(" ")));
         let _ = std::fs::remove_file(ctx.kit.state_path("known_hosts"));
@@ -2410,6 +2456,36 @@ mod tests {
         let mut cfg = crate::cfg::filled_for_test();
         cfg.current_mut().configuration = "generic".into();
         assert_eq!(install_profile(&cfg, Some("БухгалтерияПредприятия")), Ok("generic"));
+    }
+
+    /// Замер ведущего 24.11, из-за которого проба имени сперва возвращала
+    /// пустой каталог с кодом возврата 0: `/P` с пустым значением до
+    /// платформы не доезжает и забирает себе СЛЕДУЮЩИЙ аргумент — ключ
+    /// операции уезжает в пароль, и Конфигуратор молча делает не то, о чём
+    /// просили. Потому пустой пароль — это ОТСУТСТВИЕ ключа.
+    ///
+    /// Второе утверждение теста — то, за чем первое и нужно: за учётными
+    /// данными не должно идти ничего, что можно съесть. Оно держит порядок
+    /// сборки у обоих вызывающих (`configuration_name`,
+    /// `Extension::revert_apply`): ключи операции идут ДО `designer_auth`.
+    #[test]
+    fn an_empty_password_is_a_missing_key_not_an_empty_one() {
+        let mut cfg = crate::cfg::filled_for_test();
+        cfg.current_mut().db_user = "Администратор".into();
+        cfg.current_mut().db_password = String::new();
+        assert_eq!(designer_auth(cfg.current()), vec!["/NАдминистратор".to_string()]);
+
+        cfg.current_mut().db_password = "секрет-базы".into();
+        assert_eq!(designer_auth(cfg.current()), vec!["/NАдминистратор".to_string(), "/Pсекрет-базы".to_string()]);
+        // Пароль в журнал как есть не идёт — его затирает тот же `redact_text`,
+        // которым прячется `--db-password` (см. `designer_auth`).
+        let hidden = proc::redact_text("1cv8 DESIGNER /NАдминистратор /Pсекрет-базы");
+        assert!(!hidden.contains("секрет-базы"), "{hidden}");
+
+        // Пустое имя пользователя — то же правило: ключа нет вовсе.
+        cfg.current_mut().db_user = String::new();
+        cfg.current_mut().db_password = String::new();
+        assert!(designer_auth(cfg.current()).is_empty());
     }
 
     /// Имя конфигурации в `ConfigDumpInfo.xml` — первая запись выгрузки.

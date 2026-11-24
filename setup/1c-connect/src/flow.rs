@@ -304,6 +304,27 @@ fn with_real<R>(ctx: &Ctx, cancel: &AtomicBool, f: impl FnOnce(&Deps, &dyn Fn(St
 ///
 /// `--dry-run` не запираем: план на неразложенном проекте печатать можно, он
 /// ничего не делает и как раз показывает, чего не хватает.
+/// Хватает ли полей самому делу — спрашивается ЗДЕСЬ, у его порога, а не у кнопки и не у ветви команды.
+///
+/// **Зачем у порога** (Important ревью целого 24.11). Полнота переехала «к делу» (`need`, решение владельца 23.11), и `Cfg::load`
+/// перестал судить пустые поля, — а спрашивали меру три дела из пяти: `Deed::Dump` и `Deed::Load` не спрашивал НИКТО. Поверхностей
+/// у этих двух дел две (кнопка окна и набранная команда), и проверка на каждой из них была бы двумя мерами на один вопрос; порог
+/// дела один, и мимо него не проходит ни одна.
+///
+/// Стоит ДО `laid_out` не для порядка: с пустой папкой документов `Project::from_cfg` даёт ОТНОСИТЕЛЬНЫЙ путь, и `join(".git")`
+/// смотрит в рабочий каталог процесса. Набери `1c-connect export` в любом git-репозитории — гейт пройдёт, замок проекта возьмётся
+/// по ключу пустого пути, и выгрузка пойдёт в ЧУЖОЙ репозиторий (замер чтением). Из каталога без репозитория человек получал
+/// «` не разложен: нет git-репозитория`» — отказ с пустым местом там, где должна быть названа папка.
+///
+/// Сухой прогон пропускается тем же правилом, что у `laid_out`: он машину не трогает, а план — диагностика, и обрывать его
+/// отказом незачем.
+fn enough_for(ctx: &Ctx, deed: crate::need::Deed) -> Result<(), String> {
+    if ctx.dry_run {
+        return Ok(());
+    }
+    crate::need::refusal(deed, ctx.cfg.current()).map_or(Ok(()), Err)
+}
+
 fn laid_out(ctx: &Ctx) -> Result<(), String> {
     if ctx.dry_run {
         return Ok(());
@@ -316,11 +337,13 @@ fn laid_out(ctx: &Ctx) -> Result<(), String> {
 }
 
 pub fn export(ctx: &Ctx, message: &str, cancel: &AtomicBool) -> Result<String, String> {
+    enough_for(ctx, crate::need::Deed::Dump)?;
     laid_out(ctx)?;
     with_real(ctx, cancel, |d, log| export_with(d, message, log))
 }
 
 pub fn import(ctx: &Ctx, cancel: &AtomicBool) -> Result<String, String> {
+    enough_for(ctx, crate::need::Deed::Load)?;
     laid_out(ctx)?;
     with_real(ctx, cancel, |d, log| import_with(d, log))
 }
@@ -329,6 +352,31 @@ pub fn import(ctx: &Ctx, cancel: &AtomicBool) -> Result<String, String> {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    /// Пустая папка документов — отказ СЛОВАМИ и до всякой работы.
+    ///
+    /// Чем куплено (Important ревью целого 24.11): полнота переехала «к делу» 23.11, а `Deed::Dump`/`Deed::Load` не спрашивал
+    /// никто. Доходило до `laid_out`, где у пустой папки `Project::from_cfg` даёт ОТНОСИТЕЛЬНЫЙ путь и `join(".git")` смотрит в
+    /// рабочий каталог процесса: из git-репозитория гейт проходил, и выгрузка бралась за ЧУЖОЙ репозиторий. Поэтому второе
+    /// утверждение здесь не менее важно первого — отказ обязан быть про папку, а не про git.
+    #[test]
+    fn a_dump_without_a_folder_is_refused_in_words_before_it_touches_any_repository() {
+        let mut cfg = crate::cfg::filled_for_test();
+        cfg.current_mut().project = String::new();
+        let sink: common::Sink = std::sync::Arc::new(|_: common::Event| {});
+        let ctx = Ctx {
+            kit: common::kit::Kit::at(std::env::temp_dir().join(format!("flow-need-test-{}", std::process::id()))),
+            cfg,
+            dry_run: false,
+            sink,
+            prompt: Box::new(common::AlwaysDefault),
+        };
+        for no in [export(&ctx, "сообщение", &crate::project::NEVER).unwrap_err(), import(&ctx, &crate::project::NEVER).unwrap_err()]
+        {
+            assert!(no.contains("папка документов"), "названо то, чего не хватает: {no}");
+            assert!(!no.contains("git"), "и это не отказ про репозиторий рабочего каталога: {no}");
+        }
+    }
 
     struct Fake {
         // Папка проекта для `Deps::dir`: фиктивная и не обязана существовать

@@ -1607,7 +1607,8 @@ mod tests {
         std::fs::write(kit.state_path(crate::cfg::FILE), text).expect("настройки записались");
 
         let (out_tx, mut out_rx) = futures::channel::mpsc::unbounded::<crate::peer_out::Out>();
-        let peer = crate::peer::start(&kit, out_tx, crate::session::Serving::default()).expect("ключ узла заводится с первого запуска");
+        let secret = crate::node::key(kit.state()).expect("ключ узла заводится с первого запуска");
+        let peer = crate::peer::start(&kit, out_tx, crate::session::Serving::default(), secret);
         let requests = crate::enroll::Requests::default();
         let theirs = requests.clone();
         // Тот же приёмник, что у `main::peer_wiring`: заявка кладётся в общий список, остальное этой мере безразлично.

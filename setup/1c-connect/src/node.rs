@@ -187,7 +187,7 @@ fn store_for(state_dir: &Path) -> Result<crate::secrets::Store, String> {
 /// Пустой файл — не выдуманный случай: запись ниже сознательно не зовёт
 /// `sync_all`, а NTFS журналирует переименование отдельно от данных, так что
 /// крах питания оставляет ровно нулевой файл.
-pub(crate) fn key(state_dir: &Path) -> Result<SecretKey, String> {
+pub fn key(state_dir: &Path) -> Result<SecretKey, String> {
     let store = store_for(state_dir)?;
     let path = key_path(state_dir);
     match std::fs::read_to_string(&path) {

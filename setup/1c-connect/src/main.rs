@@ -611,8 +611,11 @@ fn peer_wiring(ctx: &Ctx, requests: &enroll::Requests) -> anyhow::Result<(peer::
     let (out_tx, mut out_rx) = futures::channel::mpsc::unbounded::<peer_out::Out>();
     // Ключ этой машины не открылся — подкоманда отказывает словами и ненулевым
     // кодом (`main` печатает «Остановлено: …»), а не живёт без личности: довод
-    // в докстроке `peer::start`, дорога у окна та же (`gui::doom::refuse`).
-    let node = peer::start(&ctx.kit, out_tx, serving.clone()).map_err(|e| anyhow::anyhow!(e))?;
+    // в докстроке `peer::start`. Читается он ЗДЕСЬ, а не внутри: узел без ключа
+    // поднять нельзя по подписи, и отказ рождается там, где его есть куда
+    // отдать.
+    let secret = one_c_connect::node::key(ctx.kit.state()).map_err(|e| anyhow::anyhow!(e))?;
+    let node = peer::start(&ctx.kit, out_tx, serving.clone(), secret);
     let (kit, sink, requests) = (ctx.kit.clone(), ctx.sink.clone(), requests.clone());
     std::thread::spawn(move || {
         futures::executor::block_on(async move {

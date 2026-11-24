@@ -2272,7 +2272,7 @@ fn access_of(ui: &Ui, card: &str) -> (iroh::EndpointId, crate::ticket::Ticket) {
     let key = iroh::SecretKey::generate().public();
     let ticket = crate::ticket::Ticket::issue(key, None, vec![]).unwrap();
     let mut book = crate::enrolled::Book::open(ui.kit.state()).unwrap();
-    book.enroll(&id, key, "Бухгалтер", true, crate::wire::Side::WithAgents).unwrap();
+    book.enroll(&id, key, "Бухгалтер", true, crate::wire::Side::WithAgents, None).unwrap();
     book.reissue(&id, &ticket).unwrap();
     crate::enrolled::Partners::open(ui.kit.state())
         .unwrap()
@@ -2996,7 +2996,7 @@ fn the_book_is_reread_after_the_person_allows() {
     // файл, пока окно держит свой снимок.
     let peer = a_request().peer;
     let mut conversation = crate::enrolled::Book::open(&state).unwrap();
-    conversation.enroll(&card, peer, "Заказчик", true, crate::wire::Side::WithAgents).unwrap();
+    conversation.enroll(&card, peer, "Заказчик", true, crate::wire::Side::WithAgents, None).unwrap();
     assert_eq!(ui.book.as_ref().unwrap().of(&card).len(), 0, "снимок окна о чужой записи сам не узнаёт — это и была находка");
 
     let (tx, mut rx) = tokio::sync::oneshot::channel();
@@ -3018,7 +3018,10 @@ fn the_book_is_reread_when_a_request_arrives() {
     let state = ui.kit.state().to_path_buf();
     ui.book = Some(crate::enrolled::Book::open(&state).unwrap());
     let peer = a_request().peer;
-    crate::enrolled::Book::open(&state).unwrap().enroll(&"Клевер".into(), peer, "Сосед", false, crate::wire::Side::WithAgents).unwrap();
+    crate::enrolled::Book::open(&state)
+        .unwrap()
+        .enroll(&"Клевер".into(), peer, "Сосед", false, crate::wire::Side::WithAgents, None)
+        .unwrap();
     assert_eq!(ui.book.as_ref().unwrap().of(&"Клевер".into()).len(), 0, "иначе тест проверяет не то");
 
     take_request(&mut ui, gone_pending(a_request()));
@@ -3106,7 +3109,7 @@ fn enrolments_without_a_card_are_said_out_loud_once() {
     // как у карточки отняли её строку `id`.
     crate::enrolled::Book::open(&state)
         .unwrap()
-        .enroll(&"ключ-сироты".into(), a_request().peer, "Заказчик", false, crate::wire::Side::WithAgents)
+        .enroll(&"ключ-сироты".into(), a_request().peer, "Заказчик", false, crate::wire::Side::WithAgents, None)
         .unwrap();
 
     crate::gui::save::reread_book(&mut ui);
@@ -3195,7 +3198,7 @@ fn a_revoke_by_another_process_leaves_the_window_within_one_tick() {
     let card = ui.cfg.current().id();
     let key = iroh::SecretKey::from_bytes(&[11u8; 32]).public();
     let mut book = crate::enrolled::Book::open(ui.kit.state()).expect("книга допуска завелась");
-    book.enroll(&card, key, "Заказчик", true, crate::wire::Side::WithAgents).expect("зачисление записалось");
+    book.enroll(&card, key, "Заказчик", true, crate::wire::Side::WithAgents, None).expect("зачисление записалось");
     ui.book = Some(book);
 
     // Чужой процесс — своя `Book` на тот же файл, ровно как набранный `1c-connect revoke`.

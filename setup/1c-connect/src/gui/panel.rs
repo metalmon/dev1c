@@ -6708,8 +6708,15 @@ mod tests {
                 key: a_key(7),
                 says_name: "Ромашка-бухгалтерия".into(),
                 peer_write: true,
+                base: None,
             },
-            crate::enrolled::Party { side: crate::wire::Side::WithAgents, key: a_key(9), says_name: String::new(), peer_write: false },
+            crate::enrolled::Party {
+                side: crate::wire::Side::WithAgents,
+                key: a_key(9),
+                says_name: String::new(),
+                peer_write: false,
+                base: None,
+            },
         ];
         // Машине задан полный потолок, карточке — разрешение: без них
         // ДЕЙСТВУЮЩЕЕ право вышло бы запретом, и слова о записи ниже
@@ -6782,6 +6789,7 @@ mod tests {
                 key: a_key(7),
                 says_name: "Ромашка".into(),
                 peer_write,
+                base: None,
             }];
             accepting_block(cfg, c, None, Some(&party)).expect("блок есть").parties[0].access
         };

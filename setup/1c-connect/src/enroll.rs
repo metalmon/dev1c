@@ -1074,6 +1074,16 @@ where
         },
     };
 
+    // **Признак базы ТОЙ стороны — и он не только для диалога.** Пара B: база у звонящего, агенты здесь, и вызов этих агентов назовёт
+    // его базу (`wire::Msg::McpOpen`). Назвать её он может только сам, и называет РОВНО ЗДЕСЬ, в заявке: возврат заявки не несёт и базу
+    // не называет вовсе (`Why::Return`). Не унести этот ключ в книгу допуска значило бы узнать его один раз и забыть — именно так до
+    // 24.11 и было: вызов по принятой карточке отвечал «по этой карточке ещё не подключались», пока `status` говорил «подключено»
+    // (разбор — `2026-11-17-live-run-checklist.md`). В паре A базы у той стороны нет, и называть ей нечего.
+    let theirs = match side {
+        Side::WithAgents => None,
+        Side::WithBase => Some(shown_base.base_id.clone()),
+    };
+
     // Шаг четвёртый: человек. `enroll_wait` уходит ДО диалога — иначе зовущая
     // сторона просидит минуты в тишине и сочтёт её обрывом.
     write_msg(w, &Msg::EnrollWait).await?;
@@ -1137,7 +1147,9 @@ where
             let write = crate::wire::folded_write(card.write, ceiling);
             // Сторона уезжает в книгу вместе с разрешением: человек разрешил ЭТО, а не похожее. Переключит он потом «Где
             // база» у карточки — и прежнее разрешение заговорило бы о другом (находка проверки безопасности 11.11, вторая волна).
-            if let Err(why) = book.enroll(card.id(), peer, says_name.as_str(), ceiling.allows(), side) {
+            // Тем же вызовом и тем же замком уезжает признак её базы (`theirs` выше): строка одна, писатель один, щели между
+            // «зачислил» и «запомнил базу» не бывает.
+            if let Err(why) = book.enroll(card.id(), peer, says_name.as_str(), ceiling.allows(), side, theirs.as_ref()) {
                 return ours_to_blame(w, Refuse::new(code::NOT_ALLOWED, NOT_WRITTEN), why).await;
             }
             // Исход несёт НАШУ карточку проводным ключом в обеих парах: по нему принимающая сторона числит поток за карточкой
@@ -2068,8 +2080,8 @@ mod tests {
         let (mine, theirs, _book, asked, _code) = talk(
             "separate",
             |book, peer, base, _state| {
-                book.enroll(&"b1".into(), peer, "Разработчик", true, Side::WithAgents).unwrap();
-                book.enroll(&"b2".into(), base.id(), "Кто-то ещё", true, Side::WithAgents).unwrap();
+                book.enroll(&"b1".into(), peer, "Разработчик", true, Side::WithAgents, None).unwrap();
+                book.enroll(&"b2".into(), base.id(), "Кто-то ещё", true, Side::WithAgents, None).unwrap();
                 (
                     // Код не понадобится вовсе: зачисление есть, непогашенных
                     // кодов нет, и предъявлять второму подключению нечего.
@@ -2102,7 +2114,7 @@ mod tests {
             "second-card",
             |book, peer, base, _state| {
                 // К первой карточке этот ключ уже зачислен.
-                book.enroll(&"b1".into(), peer, "Разработчик", true, Side::WithAgents).unwrap();
+                book.enroll(&"b1".into(), peer, "Разработчик", true, Side::WithAgents, None).unwrap();
                 // А для второй человек только что выдал код.
                 let ticket = Ticket::issue(base.id(), None, vec![]).unwrap();
                 book.issue(&"b2".into(), &ticket).unwrap();
@@ -2218,7 +2230,7 @@ mod tests {
         let (mine, theirs, book, asked, _code) = talk(
             "revoked",
             |book, peer, base, state| {
-                book.enroll(&"b1".into(), peer, "Разработчик", true, Side::WithAgents).unwrap();
+                book.enroll(&"b1".into(), peer, "Разработчик", true, Side::WithAgents, None).unwrap();
                 let ticket = Ticket::issue(base.id(), None, vec![]).unwrap();
                 book.issue(&"b1".into(), &ticket).unwrap();
                 // Окно в соседнем процессе: своя книга на тот же файл.
@@ -2449,7 +2461,7 @@ mod tests {
         {
             let mut talk = Alone::with(name, Decision::Allow, |book, peer, _state| {
                 // Разрешение в книге есть — выдано для ОДНОЙ пары.
-                book.enroll(&"b1".into(), peer, "Разработчик", true, granted).unwrap();
+                book.enroll(&"b1".into(), peer, "Разработчик", true, granted, None).unwrap();
                 // Карточка лежит в той куче, которую назовёт пришедшая сторона: иначе отказ был бы про кучу, а не про разрешение.
                 let card = a_card("Ромашка", "b1", true);
                 match comes {
@@ -2707,7 +2719,7 @@ mod tests {
                 // «пишем, только если переменилось», и тест прошёл бы, даже
                 // если обновления потолка не было вовсе. Теперь переменилось
                 // оба раза, и каждое направление доказано своим заходом.
-                book.enroll(&"b1".into(), peer, "Разработчик", !write, Side::WithAgents).unwrap();
+                book.enroll(&"b1".into(), peer, "Разработчик", !write, Side::WithAgents, None).unwrap();
                 vec![a_card("Ромашка", "b1", true)]
             })
             .await;
@@ -2745,7 +2757,7 @@ mod tests {
         // с зачисления. Правду говорит первое, и только оно.
         for (name, ours, stored) in [("ours-shut-stored-open", false, true), ("ours-open-stored-shut", true, false)] {
             let mut talk = Alone::new(name, Decision::Allow, |book, peer, _state| {
-                book.enroll(&"b1".into(), peer, "Разработчик", stored, Side::WithAgents).unwrap();
+                book.enroll(&"b1".into(), peer, "Разработчик", stored, Side::WithAgents, None).unwrap();
                 vec![a_card("Ромашка", "b1", ours)]
             })
             .await;
@@ -2778,7 +2790,7 @@ mod tests {
             let mut talk = Alone::with(name, Decision::Allow, |book, peer, _state| {
                 // Допуск и код — живые: отказ ниже не про них. Без этого тест
                 // нельзя было бы отличить от «кода не выдавали».
-                book.enroll(&"b1".into(), peer, "Разработчик", true, Side::WithAgents).unwrap();
+                book.enroll(&"b1".into(), peer, "Разработчик", true, Side::WithAgents, None).unwrap();
                 let ticket = Ticket::issue(peer, None, vec![]).unwrap();
                 book.issue(&"b1".into(), &ticket).unwrap();
                 Cards::Unreadable(OURS.into())
@@ -2840,7 +2852,7 @@ mod tests {
             // Код по этой карточке выдан и жив, допуск у стороны есть: отказ ниже не про них.
             let mut secret = None;
             let mut talk = Alone::with(name, Decision::Allow, |book, peer, _state| {
-                book.enroll(&"b1".into(), peer, "Разработчик", true, Side::WithAgents).unwrap();
+                book.enroll(&"b1".into(), peer, "Разработчик", true, Side::WithAgents, None).unwrap();
                 let ticket = Ticket::issue(peer, None, vec![]).unwrap();
                 book.issue(&"b1".into(), &ticket).unwrap();
                 secret = Some(hex::encode(&*ticket.secret));
@@ -2899,7 +2911,7 @@ mod tests {
             let aside = |card: Card| Cards::Read { accepting: Vec::new(), base_elsewhere: Vec::new(), not_accepting: vec![card] };
             let mut talk = Alone::with(name, Decision::Allow, |book, peer, _state| {
                 // Незачисленный к ЭТОЙ карточке — но зачисленный к соседней: книга непуста, и отказ не от того, что в ней нет ничего.
-                book.enroll(&if enrolled { "b1".into() } else { "b2".into() }, peer, "Разработчик", true, Side::WithAgents).unwrap();
+                book.enroll(&if enrolled { "b1".into() } else { "b2".into() }, peer, "Разработчик", true, Side::WithAgents, None).unwrap();
                 aside(a_card("Ромашка", "b1", true))
             })
             .await;
@@ -2937,8 +2949,8 @@ mod tests {
     #[tokio::test]
     async fn a_returning_side_gets_one_base_or_words_but_never_a_list() {
         let two = |book: &mut Book, peer: EndpointId, _state: &std::path::Path| {
-            book.enroll(&"b1".into(), peer, "Разработчик", true, Side::WithAgents).unwrap();
-            book.enroll(&"b2".into(), peer, "Разработчик", true, Side::WithAgents).unwrap();
+            book.enroll(&"b1".into(), peer, "Разработчик", true, Side::WithAgents, None).unwrap();
+            book.enroll(&"b2".into(), peer, "Разработчик", true, Side::WithAgents, None).unwrap();
             vec![a_card("Ромашка", "b1", true), a_card("Василёк", "b2", true)]
         };
 
@@ -2977,7 +2989,7 @@ mod tests {
         // карточку сама. Так эта беда и залечивается сама собой у того, у кого
         // карточка к партнёру одна.
         let mut talk = Alone::new("returns-unnamed-one", Decision::Allow, |book, peer, _state| {
-            book.enroll(&"b1".into(), peer, "Разработчик", true, Side::WithAgents).unwrap();
+            book.enroll(&"b1".into(), peer, "Разработчик", true, Side::WithAgents, None).unwrap();
             vec![a_card("Ромашка", "b1", true), a_card("Василёк", "b2", true)]
         })
         .await;
@@ -2999,7 +3011,7 @@ mod tests {
     #[tokio::test]
     async fn a_returning_side_whose_card_is_no_longer_allowed_is_refused_in_words() {
         let mut talk = Alone::new("returns-revoked", Decision::Allow, |book, peer, _state| {
-            book.enroll(&"b1".into(), peer, "Разработчик", true, Side::WithAgents).unwrap();
+            book.enroll(&"b1".into(), peer, "Разработчик", true, Side::WithAgents, None).unwrap();
             vec![a_card("Ромашка", "b1", true), a_card("Василёк", "b2", true)]
         })
         .await;
@@ -3039,7 +3051,7 @@ mod tests {
     #[tokio::test]
     async fn a_return_is_not_made_to_wait_for_a_request_issued_for_another_card() {
         let mut talk = Alone::new("returns-while-ticket", Decision::Allow, |book, peer, _state| {
-            book.enroll(&"b1".into(), peer, "Разработчик", true, Side::WithAgents).unwrap();
+            book.enroll(&"b1".into(), peer, "Разработчик", true, Side::WithAgents, None).unwrap();
             // А для ВТОРОЙ карточки человек только что выдал код — он живой и
             // ждёт свою сторону. К этому потоку он не имеет никакого
             // отношения.

@@ -1059,7 +1059,11 @@ async fn accepting(node: Node, channels: Channels, kit: Kit, tx: UnboundedSender
 /// **Чего здесь нет нарочно.** Ни одного правила моста: ни белого списка инструментов, ни подмешивания своих, ни пересоздания ребёнка.
 /// Мост стоит на той стороне, у базы, и это и есть граница работы — «меняется труба, а не механизм» (спека протокола, раздел «MCP»).
 ///
-/// Партнёр и ключ его базы берутся из того же места, откуда их берёт возврат (`enrolled::Partners`): второго списка партнёров нет.
+/// **Куда вести вызов, решает `enrolled::route`, и решает это ОДИНАКОВО для карточки, которая звонила, и для той, которая звонок
+/// приняла.** Кто кому позвонил при знакомстве, не решает, кто потом может спросить базу: достижимость узлов iroh симметрична, а
+/// «где база» и «где агенты» — две независимые вещи (спека серверного режима 29.10). Второго списка партнёров под это не заводится:
+/// у звонившей карточки ключ и признак базы лежат рядом с партнёром (`Partners::route_of`), у принявшей — в книге допуска, рядом с
+/// ключом той стороны и её `side` (`Party::base`); обе памяти уже были, и обе спрашивает одна функция.
 async fn pipe_calls(
     kit: &Kit,
     tx: &UnboundedSender<Out>,
@@ -1075,11 +1079,24 @@ async fn pipe_calls(
             return;
         }
     };
-    let (Some(partner), Some(base)) = (partners.of(card), partners.base_id_of(card)) else {
-        say(tx, common::Event::Warn("Вызов агента некуда вести: по этой карточке ещё не подключались.".to_string()));
-        return;
+    // Книга открывается ЗДЕСЬ, а не держится снимком: `open` перечитывает файл под замком, и список зачисленных у неё свежий.
+    // Решение о ДОПУСКЕ по этому списку не принимается (на это есть `enrolled_to`, читающий диск под каждый вопрос) — здесь
+    // решается, куда уходит НАШ вызов, а отозванная сторона отсечётся там, где допуск и спрашивают: у себя (`Admission::of`).
+    let book = match Book::open(kit.state()) {
+        Ok(b) => b,
+        Err(e) => {
+            say(tx, common::Event::Fail(e));
+            return;
+        }
     };
-    let Some(channel) = channels.of(partner.key) else {
+    let route = match crate::enrolled::route(partners.route_of(card), &book.of(card)) {
+        Ok(route) => route,
+        Err(words) => {
+            say(tx, common::Event::Warn(words.to_string()));
+            return;
+        }
+    };
+    let Some(channel) = channels.of(route.key) else {
         say(tx, common::Event::Warn("Вызов агента некуда вести: связь с той стороной сейчас не держится.".to_string()));
         return;
     };
@@ -1092,7 +1109,7 @@ async fn pipe_calls(
     };
     let opened = {
         let (send, recv) = control.halves();
-        match crate::wire::Frame::write(send, &crate::wire::Msg::McpOpen { base_id: base, kind }).await {
+        match crate::wire::Frame::write(send, &crate::wire::Msg::McpOpen { base_id: route.base, kind }).await {
             Err(e) => Err(e.to_string()),
             // Ответ ждём тем же сроком, что и прочие кадры разговора: молчание той стороны — такой же ответ, как отказ.
             Ok(()) => match enroll::first_frame(send, recv).await {

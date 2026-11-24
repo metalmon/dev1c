@@ -1810,8 +1810,8 @@ mod tests {
     fn two_enrolled(stand: &Stand, a: iroh::EndpointId, b: iroh::EndpointId) -> crate::cfg::CardId {
         let card = crate::cfg::Cfg::load_unchecked(&stand.kit).expect("настройки стенда").by_name("Ромашка").expect("карточка").id();
         let mut book = crate::enrolled::Book::open(stand.kit.state()).expect("книга допуска");
-        book.enroll(&card, a, "Заказчик", true, crate::wire::Side::WithAgents).expect("первое зачисление");
-        book.enroll(&card, b, "Подрядчик", false, crate::wire::Side::WithAgents).expect("второе зачисление");
+        book.enroll(&card, a, "Заказчик", true, crate::wire::Side::WithAgents, None).expect("первое зачисление");
+        book.enroll(&card, b, "Подрядчик", false, crate::wire::Side::WithAgents, None).expect("второе зачисление");
         card
     }
 

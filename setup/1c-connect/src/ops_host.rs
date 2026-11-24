@@ -771,9 +771,13 @@ fn mcp_exe_at(kit_root: &Path) -> PathBuf {
 /// Команда `mcp-1c --install`, какой её собирает `Extension::apply`: пароль базы — ключом `--db-password`, а не переменной `MCP_1C_PASSWORD`. Это второе честное исключение задачи 5, рядом с `/P` Конфигуратору (`revert_apply` ниже) — не выбор удобства, а то, что установщик умеет читать: ветка `if *installDB != "" { installer.Install(…) }` в `cmd/mcp-1c/main.go` тега `v1.23.0` стоит ВЫШЕ `cfg := config.Load()`, и ни в `main.go`, ни в `installer/installer.go` нет ни одного `os.Getenv` — переменная окружения до установки просто не доходит (замер 30.10, по исходнику тега; найдено ревью задачи 7, Critical 1: установка расширения на базе с непустым паролем молча уезжала с пустым).
 ///
 /// Переменной `MCP_1C_PASSWORD` пароль передаёт только мост (`bridge::mcp_command`) — другой запуск того же бинаря, читающий `config.Load()` по-настоящему; командная строка процесса на Windows видна любому процессу пользователя (`tasklist`, диспетчер задач) ровно так же, как и у `/P`, но дольше, чем секунды, она здесь не живёт, а в журнал и план значение после `--db-password` прячет `proc::redact`/`redact_text` тем же приёмом, что `/P…`. `--db-user` остаётся ключом открыто — он не секрет.
-pub fn install_command(cfg: &Cfg, kit: &Kit) -> Result<tokio::process::Command, String> {
+///
+/// `detected` — имя конфигурации базы, если его удалось прочитать у платформы
+/// до установки (`configuration_name`): решение о профиле принимает один
+/// `install_profile`, а добывание факта стоит рядом с ним и ему не мешает.
+pub fn install_command(cfg: &Cfg, kit: &Kit, detected: Option<&str>) -> Result<tokio::process::Command, String> {
     let h = cfg.current();
-    let profile = install_profile(cfg)?;
+    let profile = install_profile(cfg, detected)?;
     let mut c = tokio::process::Command::new(mcp_exe(kit));
     c.args(["--install", &h.base_path, "--db-user", &h.db_user, "--install-profile", profile, "--db-password", &h.db_password]);
     Ok(c)
@@ -787,26 +791,128 @@ pub fn install_command(cfg: &Cfg, kit: &Kit) -> Result<tokio::process::Command, 
 /// (замер ведущего 2.11).
 ///
 /// `auto` у установки нет: флаг форка `--install-profile` принимает только
-/// `generic|buh_3_0` (`cmd/mcp-1c/main.go`), угадывать вид конфигурации
-/// умеет только РАБОТА (там `auto` разрешает сам сервер по составу базы).
-/// Тихо подставить `generic`, как было, нельзя — это и есть расхождение,
-/// которое ловит задача 8. Мой выбор — отказ словами, а не угадывание:
-/// установка расширения бывает один раз, и человек в этот момент рядом —
-/// он может тут же дописать `configuration` своему соединению и повторить; а неверно
-/// угаданный профиль он обнаружит только месяц спустя по неверным
-/// документам, когда это будет стоить куда дороже одной отменённой
-/// установки.
-fn install_profile(cfg: &Cfg) -> Result<&str, String> {
+/// `generic|buh_3_0` — и не молча, а отказом словами (замер 24.11 по
+/// комплектному бинарю: `--install-profile auto` → `invalid
+/// --install-profile: unsupported install profile "auto" (allowed:
+/// generic|buh_3_0)`; тот же список в `internal/profile/resolver.go`,
+/// `NormalizeInstallProfile`). Значит перевести `auto` в профиль обязаны мы.
+///
+/// **Три исхода, в этом порядке.** Названное человеком сильнее определённого:
+/// поле `configuration` остаётся способом переопределить, если определение
+/// ошиблось. Не названо — решаем по ИМЕНИ конфигурации базы, которое
+/// платформа отдаёт до установки расширения (`configuration_name`). Имени не
+/// добыли — отказ словами, прежний текст; разница с прежним поведением ровно
+/// в том, что до отказа программа обязана попытаться узнать, а не сдаваться
+/// на пустом поле. Прежний отказ на всяком пустом поле и был дефектом:
+/// человек, работающий только окном, не мог довести установку до конца ни на
+/// какой базе — поля `configuration` в окне нет и по решению владельца 24.11
+/// не будет, вид определяется, а не спрашивается.
+///
+/// Чистая функция: факт ей называет вызывающий, своего запуска платформы у
+/// неё нет — потому все три исхода проверяются тестами без живой базы.
+fn install_profile(cfg: &Cfg, detected: Option<&str>) -> Result<&'static str, String> {
     match cfg.configuration()? {
-        "auto" => {
-            // Секцию фраза больше не называет (задача 4 плана «Модель
-            // соединений»): поле живёт в блоке соединения, и прежняя
-            // подсказка «[host] configuration» вела бы человека в секцию,
-            // которой в его файле может не быть вовсе.
-            Err("не могу выбрать профиль расширения сам: укажите вид конфигурации в поле configuration своего соединения в 1c-connect.toml (generic или buh_3_0)".to_string())
-        }
-        other => Ok(other),
+        // Секцию фраза не называет (задача 4 плана «Модель соединений»): поле
+        // живёт в блоке соединения, и подсказка «[host] configuration» вела бы
+        // человека в секцию, которой в его файле может не быть вовсе.
+        "auto" => detected.map(profile_for_configuration_name).ok_or_else(|| {
+            "не могу выбрать профиль расширения сам: укажите вид конфигурации в поле configuration своего соединения в 1c-connect.toml (generic или buh_3_0)".to_string()
+        }),
+        "buh_3_0" => Ok("buh_3_0"),
+        "generic" => Ok("generic"),
+        // `Cfg::configuration` сюда ничего четвёртого не пускает, но ставить
+        // здесь `other => Ok(other)` значило бы молча пропустить в базу
+        // профиль, которого установщик не знает, если список допустимых
+        // когда-нибудь вырастет. Отказ словами дешевле такой находки.
+        other => Err(format!("вид конфигурации «{other}» известен работе, но не установке расширения (она принимает generic или buh_3_0)")),
     }
+}
+
+/// Имя конфигурации → вид расширения. ЕДИНСТВЕННОЕ место в коннекторе,
+/// которое отвечает на этот вопрос.
+///
+/// Правило не выдумано: это дословно правило самого `mcp-1c`
+/// (`internal/profile/resolver.go`, `Detect`) — имя в нижнем регистре
+/// содержит `бухгалтерияпредприятия` → `buh_3_0`, всё прочее → `generic`.
+/// Иначе установка и работа ответили бы на один вопрос по-разному, а это
+/// худший разряд дефектов этого дерева: в базу уехал бы не тот фасад
+/// `MCPBusinessFacade`, и заметили бы это по неверным документам месяц спустя.
+///
+/// **Чем мы беднее форка и почему это не беда.** `Detect` смотрит ещё и на
+/// версию (`strings.HasPrefix(version, "3.0")`), а у нас её нет: до установки
+/// расширения платформа отдаёт имя (`ConfigDumpInfo.xml`), но не свойство
+/// «Версия» конфигурации. Расхождение возможно ровно на одной базе —
+/// «Бухгалтерия предприятия» версии НЕ 3.0; таких на платформе 8.3+ не
+/// бывает, а если человек такую принесёт, у него есть поле `configuration`,
+/// и названное им значение сильнее определённого (см. `install_profile`).
+fn profile_for_configuration_name(name: &str) -> &'static str {
+    if name.trim().to_lowercase().contains("бухгалтерияпредприятия") {
+        "buh_3_0"
+    } else {
+        "generic"
+    }
+}
+
+/// Имя конфигурации базы, прочитанное ПЛАТФОРМОЙ — до того, как в базе
+/// появилось наше расширение. Нужна ровно затем, чтобы не спрашивать у
+/// человека то, что можно узнать (решение владельца 24.11).
+///
+/// `1cv8 DESIGNER … /DumpConfigToFiles <каталог> -configDumpInfoOnly` пишет в
+/// каталог ОДИН файл `ConfigDumpInfo.xml` вместо всей выгрузки — замер 24.11
+/// на пустой базе: код возврата 0, две секунды, один файл. Полная выгрузка
+/// той же дорогой стоила бы минуты и сотни мегабайт, и ставить её перед
+/// каждой установкой было бы нельзя.
+///
+/// Форма вызова — та же, что у `revert_apply` ниже (`/N`, `/P` после ключа
+/// операции, экран через `display_argv`): у Конфигуратора в этом дереве одна
+/// проверенная форма, и вторую заводить незачем.
+///
+/// `None` на любом отказе — не беда и не молчание: решение принимает
+/// `install_profile`, и на `None` он отказывает словами, называя поле и
+/// допустимые значения. Хвост вывода Конфигуратора уходит в журнал
+/// предупреждением, чтобы «не смог прочитать имя» не выглядело молчанием
+/// экрана.
+fn configuration_name(ctx: &Ctx) -> Option<String> {
+    let v8 = find_1cv8(&ctx.cfg)?;
+    let h = ctx.cfg.current();
+    let dir = std::env::temp_dir().join(format!("1c-connect-dumpinfo-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).ok()?;
+    let ib = ib_switch(&h.base_path);
+    let n = format!("/N{}", h.db_user);
+    let p = format!("/P{}", h.db_password);
+    let out = dir.to_string_lossy().into_owned();
+    let args = ["DESIGNER", &ib, "/DisableStartupDialogs", "/DumpConfigToFiles", &out, "-configDumpInfoOnly", &n, &p];
+    let (prog, args) = display_argv(&v8.to_string_lossy(), &args, display_wrapper().as_deref());
+    let run = proc::exec(ctx, &prog, &args.iter().map(String::as_str).collect::<Vec<_>>());
+    let xml = std::fs::read_to_string(dir.join("ConfigDumpInfo.xml"));
+    let _ = std::fs::remove_dir_all(&dir);
+    match (run, xml) {
+        (Ok(o), Ok(xml)) if o.ok() => configuration_name_in_dump_info(&xml).map(str::to_string),
+        (Ok(o), _) => {
+            ctx.warn(format!("вид конфигурации не определён — Конфигуратор не отдал имя: {}", proc::redact_text(&o.tail(3).join(" "))));
+            None
+        }
+        (Err(e), _) => {
+            ctx.warn(format!("вид конфигурации не определён — Конфигуратор не запустился: {e}"));
+            None
+        }
+    }
+}
+
+/// Имя конфигурации из `ConfigDumpInfo.xml`: первая запись выгрузки — корень,
+/// `name="Configuration.<Имя>"` (замер 24.11 по настоящей выгрузке
+/// расширения, `extension/src/ConfigDumpInfo.xml` форка:
+/// `name="Configuration.MCP_HTTPService"`). Чистая функция — платформа ей не
+/// нужна, текст называет вызывающий.
+///
+/// `None` — это и «файла не разобрать», и пустая `<ConfigVersions/>` у базы
+/// без конфигурации: оба случая значат «имени не добыли», а решать, что с
+/// этим делать, — дело `install_profile`, не этой функции.
+fn configuration_name_in_dump_info(xml: &str) -> Option<&str> {
+    let (_, tail) = xml.split_once("name=\"Configuration.")?;
+    let (name, _) = tail.split_once('"')?;
+    (!name.is_empty()).then_some(name)
 }
 
 /// Переменная окружения, которая целиком перекрывает поиск платформы: указывает
@@ -2075,18 +2181,35 @@ impl Op<Ctx> for Extension {
         // мог бы молчать про `auto`, а установка — отказать, и человек не
         // понял бы заранее, почему.
         let prefix = display_wrapper().map(|x| format!("{} -a ", x.display())).unwrap_or_default();
-        let line = match install_profile(&ctx.cfg) {
-            Ok(profile) => format!(
-                // Скобка говорит человеку то, что ему пригодится: сколько ждать и
-                // что мелькнёт на экране. Почему пароль идёт ключом, а не
-                // переменной окружения, — объяснение для нас, оно живёт в
-                // докстроке `install_command`; в плане это была внутренняя
-                // заметка, утёкшая в текст для человека (наблюдение владельца
-                // 30.10: «это что за комментарии в выводе?»).
+        // Скобка говорит человеку то, что ему пригодится: сколько ждать и что
+        // мелькнёт на экране. Почему пароль идёт ключом, а не переменной
+        // окружения, — объяснение для нас, оно живёт в докстроке
+        // `install_command`; в плане это была внутренняя заметка, утёкшая в
+        // текст для человека (наблюдение владельца 30.10: «это что за
+        // комментарии в выводе?»).
+        let line_for = |profile: &str| {
+            format!(
                 "{prefix}mcp-1c --install {} --db-user {} --install-profile {profile} --db-password … (вызовет конфигуратор, минута-две)",
                 ctx.cfg.current().base_path,
                 ctx.cfg.current().db_user
-            ),
+            )
+        };
+        // Своего запуска Конфигуратора у плана нет нарочно: план печатается
+        // перед каждой установкой (`run::apply_all`), и заводить в нём второй
+        // поход в базу значило бы ходить туда дважды за один `install`. Поэтому
+        // на `auto` план честно говорит, ЧЕМ будет решено, а не называет
+        // профиль, которого ещё не знает, и не печатает отказ, которого может и
+        // не быть.
+        let line = match ctx.cfg.configuration() {
+            Ok("auto") => line_for("<по имени конфигурации базы>"),
+            // Вид назван человеком — решает тот же `install_profile`, которым
+            // решает сам `install_command`: иначе предпросмотр и установка
+            // разошлись бы в профиле, а это ровно тот разряд дефектов, от
+            // которого здесь всё и построено.
+            Ok(_) => match install_profile(&ctx.cfg, None) {
+                Ok(profile) => line_for(profile),
+                Err(e) => e,
+            },
             Err(e) => e,
         };
         vec![Action::new(line)]
@@ -2101,7 +2224,16 @@ impl Op<Ctx> for Extension {
         }
         let h = ctx.cfg.current();
         // Программа и аргументы — все из `install_command`: пароль в них уже есть ключом `--db-password` (второе честное исключение задачи 5, см. докстроку `install_command`), набирать его второй раз отдельной строкой незачем — иначе кто-то однажды поправит `install_command`, глядя на неё как на источник правды, а установка продолжит слать старые аргументы. Экран Конфигуратору даём здесь же (см. `display_prefix`): иначе на Linux без `DISPLAY` он не стартует. Окружение у `install_command` теперь пусто — `proc::exec_env` берёт его тем же путём, что и раньше, просто со списком без пар; собственной сигнатуры у неё это не меняет.
-        let install = install_command(&ctx.cfg, &ctx.kit).map_err(|e| anyhow::anyhow!("{e}"))?;
+        // Имя конфигурации спрашиваем у платформы ПЕРЕД установкой и только
+        // когда вид не назван: на названном оно всё равно ничего не решает
+        // (названное сильнее определённого, см. `install_profile`), и лишний
+        // поход в базу был бы платой ни за что. В сухом прогоне в базу не
+        // ходим вовсе — он на то и сухой.
+        let detected = match (ctx.dry_run, ctx.cfg.configuration()) {
+            (false, Ok("auto")) => configuration_name(ctx),
+            _ => None,
+        };
+        let install = install_command(&ctx.cfg, &ctx.kit, detected.as_deref()).map_err(|e| anyhow::anyhow!("{e}"))?;
         let exe = install.as_std().get_program().to_string_lossy().into_owned();
         let install_args: Vec<String> = install.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         let install_env: Vec<(String, String)> = install
@@ -2204,7 +2336,7 @@ mod tests {
         // Вид конфигурации назван явно: задача 8 отказывает на `auto`
         // (умолчание `filled_for_test`), а этот тест — про пароль, не про профиль.
         cfg.current_mut().configuration = "generic".into();
-        let c = install_command(&cfg, &kit_for_test()).expect("generic — известный профиль, отказа быть не должно");
+        let c = install_command(&cfg, &kit_for_test(), None).expect("generic — известный профиль, отказа быть не должно");
         let args: Vec<String> = c.as_std().get_args().map(|a| a.to_string_lossy().into()).collect();
         let i = args.iter().position(|a| a == "--db-password").unwrap_or_else(|| panic!("--db-password нет в аргументах: {args:?}"));
         assert_eq!(args[i + 1], "секрет-базы", "{args:?}");
@@ -2221,7 +2353,7 @@ mod tests {
     fn the_installed_profile_matches_the_runtime_one() {
         let mut cfg = crate::cfg::filled_for_test();
         cfg.current_mut().configuration = "buh_3_0".into();
-        let c = install_command(&cfg, &kit_for_test()).expect("buh_3_0 — известный профиль, отказа быть не должно");
+        let c = install_command(&cfg, &kit_for_test(), None).expect("buh_3_0 — известный профиль, отказа быть не должно");
         let args: Vec<String> = c.as_std().get_args().map(|a| a.to_string_lossy().into()).collect();
         assert!(args.windows(2).any(|w| w == ["--install-profile", "buh_3_0"]), "{args:?}");
     }
@@ -2232,22 +2364,64 @@ mod tests {
     fn the_installed_profile_matches_the_runtime_one_for_generic() {
         let mut cfg = crate::cfg::filled_for_test();
         cfg.current_mut().configuration = "generic".into();
-        let c = install_command(&cfg, &kit_for_test()).expect("generic — известный профиль, отказа быть не должно");
+        let c = install_command(&cfg, &kit_for_test(), None).expect("generic — известный профиль, отказа быть не должно");
         let args: Vec<String> = c.as_std().get_args().map(|a| a.to_string_lossy().into()).collect();
         assert!(args.windows(2).any(|w| w == ["--install-profile", "generic"]), "{args:?}");
     }
 
-    /// Случай `auto` — мой выбор, не умолчание форка (см. докстроку
-    /// `install_command`): у установки `auto` нет, флаг форка принимает
-    /// только `generic|buh_3_0`. Отказ словами сейчас, при установке, а не
-    /// тихий `generic` — установка бывает один раз, человек рядом, а
-    /// неверный профиль он заметит только месяц спустя по неверным
-    /// документам.
+    /// Третий исход сторожа: вид не назван И имени конфигурации добыть не
+    /// удалось. Только здесь отказ честен — назвать профиль не из чего.
+    ///
+    /// Прежде этот же отказ стоял на ВСЯКОМ пустом поле, и это был дефект:
+    /// поля `configuration` в окне нет, значит человек, работающий только
+    /// окном, не мог довести установку до конца ни на какой базе. Теперь
+    /// пустое поле — повод определить (`profile_for_configuration_name`), и
+    /// отказ остаётся лишь там, где определять не из чего.
     #[test]
-    fn install_command_refuses_auto_instead_of_guessing_a_profile() {
-        let cfg = crate::cfg::filled_for_test(); // host.configuration пусто → auto
-        let err = install_command(&cfg, &kit_for_test()).expect_err("auto обязан отказать, а не тихо выбрать профиль");
-        assert!(err.contains("configuration"), "{err}");
+    fn install_profile_refuses_only_when_the_name_was_not_read() {
+        let cfg = crate::cfg::filled_for_test(); // configuration пусто → auto
+        let err = install_profile(&cfg, None).expect_err("без имени конфигурации выбирать профиль не из чего");
+        assert!(err.contains("configuration") && err.contains("generic") && err.contains("buh_3_0"), "{err}");
+    }
+
+    /// Второй исход: вид не назван, но имя конфигурации прочитано — профиль
+    /// определяется, а не спрашивается (решение владельца 24.11). Правило —
+    /// дословно правило самого `mcp-1c` (`internal/profile/resolver.go`,
+    /// `Detect`): бухгалтерское имя → `buh_3_0`, любое другое → `generic`.
+    /// Имя УНФ взято из замера владельца 24.11 на живой учебной базе, оно же
+    /// возвращается `get_configuration_info`.
+    #[test]
+    fn install_profile_decides_by_the_configuration_name() {
+        let cfg = crate::cfg::filled_for_test(); // configuration пусто → auto
+        assert_eq!(install_profile(&cfg, Some("БухгалтерияПредприятия")), Ok("buh_3_0"));
+        assert_eq!(install_profile(&cfg, Some("УправлениеНебольшойФирмойУчебная")), Ok("generic"));
+        // Регистр имени решать не должен: `Detect` сравнивает в нижнем.
+        assert_eq!(install_profile(&cfg, Some("бухгалтерияпредприятияКорп")), Ok("buh_3_0"));
+    }
+
+    /// Первый исход, и он сильнее второго: названное человеком значение бьёт
+    /// определённое — поле `configuration` остаётся способом переопределить,
+    /// если определение ошиблось. Без этого теста порядок двух исходов мог бы
+    /// однажды перевернуться незамеченным: на бухгалтерской базе оба дают
+    /// `buh_3_0`, и разницу видно только так — на имени, которое спорит с
+    /// названным видом.
+    #[test]
+    fn the_named_kind_outranks_the_detected_one() {
+        let mut cfg = crate::cfg::filled_for_test();
+        cfg.current_mut().configuration = "generic".into();
+        assert_eq!(install_profile(&cfg, Some("БухгалтерияПредприятия")), Ok("generic"));
+    }
+
+    /// Имя конфигурации в `ConfigDumpInfo.xml` — первая запись выгрузки.
+    /// Образец взят из настоящей выгрузки расширения
+    /// (`extension/src/ConfigDumpInfo.xml` форка, замер 24.11), пустой
+    /// `<ConfigVersions/>` — из выгрузки пустой базы, созданной тем же
+    /// замером: `-configDumpInfoOnly` отдаёт её именно такой.
+    #[test]
+    fn the_configuration_name_comes_from_the_dump_info() {
+        let real = "<ConfigVersions>\n\t\t<Metadata name=\"Configuration.MCP_HTTPService\" id=\"a433a1ba\" configVersion=\"154cf6\"/>\n\t\t<Metadata name=\"HTTPService.MCPService\" id=\"93b52b96\"/>";
+        assert_eq!(configuration_name_in_dump_info(real), Some("MCP_HTTPService"));
+        assert_eq!(configuration_name_in_dump_info("<ConfigDumpInfo><ConfigVersions/></ConfigDumpInfo>"), None);
     }
 
     /// `plan()` обязан печатать ту же команду, что потом реально запустит
@@ -2263,13 +2437,40 @@ mod tests {
         assert!(actions.iter().any(|a| a.0.contains("--install-profile buh_3_0")), "{actions:?}");
     }
 
-    /// Тот же предпросмотр на `auto`: человек обязан увидеть отказ ДО того,
-    /// как нажмёт «применить», а не узнать о нём только из провала `apply()`.
+    /// Тот же предпросмотр на `auto`. **Утверждение переписано вместе с
+    /// доводом 24.11, потому что прав код, а не прежнее ожидание.** Прежде
+    /// тест требовал от плана ОТКАЗА («человек обязан увидеть отказ до того,
+    /// как нажмёт «применить»»), и это было верно, пока отказ был
+    /// неизбежен. Теперь на `auto` установка вид определяет
+    /// (`configuration_name` → `profile_for_configuration_name`), и отказа
+    /// может не быть вовсе — печатать его заранее значило бы пугать человека
+    /// тем, чего не случится.
+    ///
+    /// Чего план печатать по-прежнему не имеет права — так это назвать
+    /// профиль, которого ещё не знает: своего похода в базу у плана нет
+    /// нарочно (см. комментарий в `plan`). Поэтому он говорит, ЧЕМ будет
+    /// решено, и тест держит именно это: ни `generic`, ни `buh_3_0` в строке
+    /// не стоит.
     #[test]
-    fn extension_plan_refuses_auto_instead_of_hiding_it() {
+    fn extension_plan_says_the_kind_will_be_read_from_the_base() {
         let ctx = publication_ctx(crate::cfg::filled_for_test(), true); // configuration пусто → auto
         let actions = Extension.plan(&ctx);
-        assert!(actions.iter().any(|a| a.0.contains("configuration")), "{actions:?}");
+        let line = actions.iter().map(|a| a.0.clone()).collect::<Vec<_>>().join("\n");
+        assert!(line.contains("--install-profile <по имени конфигурации базы>"), "{line}");
+        assert!(!line.contains("generic") && !line.contains("buh_3_0"), "{line}");
+    }
+
+    /// Названный, но нераспознанный вид — отказ в плане остаётся: тут
+    /// определять нечего, человек уже назвал значение, и значение негодное.
+    /// Без этого теста правка `plan` могла бы увести все три исхода в одну
+    /// строку «определим по имени базы» и съесть отказ `Cfg::configuration`.
+    #[test]
+    fn extension_plan_still_refuses_a_kind_it_does_not_know() {
+        let mut cfg = crate::cfg::filled_for_test();
+        cfg.current_mut().configuration = "buh3".into();
+        let ctx = publication_ctx(cfg, true);
+        let actions = Extension.plan(&ctx);
+        assert!(actions.iter().any(|a| a.0.contains("не распознан")), "{actions:?}");
     }
 
     /// Круг исправления 2 (находка автоматической проверки безопасности):

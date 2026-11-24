@@ -379,7 +379,10 @@ fn run() -> Result<()> {
             }
             ext.revert_apply(&ctx, CleanLevel::Stack)?;
         }
-        Cmd::Connect => connect(&ctx)?,
+        // Отказ ПОДЪЁМА у долгоживущих подкоманд ложится на диск — та же рамка, что печатает `main`, и тот же довод, что у окна
+        // (`gui::seen_by_the_person`): журнал прикладывают к обращению в поддержку, а консоли у запуска планировщиком потом нет.
+        // Печать остаётся за `main` одна: второй раз те же слова человеку не повторяются.
+        Cmd::Connect => connect(&ctx).inspect_err(|e| journal::record_stop(&ctx.kit, &format!("{e:#}")))?,
         // `serve` — тот же бек, которому сказали не открывать окно при старте (спека, раздел 4): не отдельная программа и не
         // урезанная. Значок, замок (он же управляющая дверь), узел, публикация и сеанс у него те же самые, потому что путь подъёма
         // один — `gui::launch`; чем именно он разнится с двойным щелчком, названо вариантом `Start::Serve` целиком (шесть отличий,
@@ -391,7 +394,7 @@ fn run() -> Result<()> {
         #[cfg(feature = "gui")]
         Cmd::Serve => return one_c_connect::gui::launch(ctx.kit.clone(), Start::Serve),
         #[cfg(not(feature = "gui"))]
-        Cmd::Serve => serve(&ctx)?,
+        Cmd::Serve => serve(&ctx).inspect_err(|e| journal::record_stop(&ctx.kit, &format!("{e:#}")))?,
         Cmd::Export { message } => {
             let t = flow::export(&ctx, &message, &project::NEVER).map_err(|e| anyhow::anyhow!("{e}"))?;
             println!("{t}");

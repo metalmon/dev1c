@@ -2324,11 +2324,10 @@ mod doom {
             // отсюда не бывает: на этой дороге пишем только мы, на безоконной — только `no_place_for_a_window`, и дорога у отказа
             // всегда одна.
             RefusalRoad::OsMessage => {
-                let text = crate::journal::stopped(why);
                 if let Some(kit) = kit {
-                    crate::journal::write(kit, Kind::Fail, &text);
+                    crate::journal::record_stop(kit, why);
                 }
-                fatal(&text);
+                fatal(&crate::journal::stopped(why));
                 std::process::exit(1)
             }
             // Слова и код считает бек — и считает их ОДИН раз на все поводы: `no_place_for_a_window` зовут только отсюда,
@@ -2476,7 +2475,17 @@ fn window_kit() -> anyhow::Result<Kit> {
 fn seen_by_the_person(start: Start, kit: Option<&Kit>, outcome: anyhow::Result<()>) -> anyhow::Result<()> {
     match outcome {
         Err(e) if !start.speaks_to_console() => refuse(&format!("{e:#}"), kit),
-        other => other,
+        // Консольная дорога: СЛОВА печатает `main` — и печатает их одной рамкой со всеми (`journal::stopped`), — а след на диске
+        // обязан остаться и здесь. Замер владельца 24.11: `serve` с чужим `node.key` сказал всё верно в консоль, ушёл с кодом 1, а
+        // в журнале не было ни строки — и тому, кто поднял `serve` задачей планировщика, искать беду было негде. Печатать отсюда
+        // нельзя: вторая печать той же строки — ровно то, что запрещает `say_aloud`.
+        Err(e) => {
+            if let Some(kit) = kit {
+                crate::journal::record_stop(kit, &format!("{e:#}"));
+            }
+            Err(e)
+        }
+        ok => ok,
     }
 }
 

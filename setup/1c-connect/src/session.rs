@@ -657,7 +657,7 @@ impl Serve {
             let log = self.log.clone();
             let web_port = self.web_port;
             tokio::spawn(async move {
-                if let Err(e) = bridge::pipe_tcp(stream, web_port).await {
+                if let Err(e) = bridge::pipe_tcp(stream, web_port, "публикация базы не поднята").await {
                     log(Event::Warn(e));
                 }
             })

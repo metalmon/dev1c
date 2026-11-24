@@ -113,10 +113,38 @@ impl Toward {
     /// `serve` узла не поднимал, ручки не имел — и сторона без базы отказывала словами «связь держит окно программы». Отказ был
     /// правдой ровно пока окно было единственным местом, где живёт узел.
     pub fn of(combo: crate::cfg::Combo, to_channel: ToChannel) -> Toward {
+        match Bridge::of(combo) {
+            Bridge::Here => Toward::Child,
+            Bridge::ThatSide => Toward::Channel(to_channel),
+        }
+    }
+}
+
+/// Где стоит мост к базе — ОДИН вопрос на оба пути, какими к мосту приходит агент: местный порт (`Toward::of` выше) и поток
+/// подкоманды `1c-connect mcp` (`ops_host::run_mcp`).
+///
+/// **Заведён починкой 25.11, и вот чем.** Вопрос спрашивал только порт. Поток не спрашивал его вовсе — поднимал своего ребёнка
+/// всегда, — и на карточке «база на той стороне» ребёнок не запускался (публикации тут нет, базы тут нет), а мост отвечал агенту
+/// ПУСТЫМ списком инструментов. Живой агент `pi` читал `1c: connected, 0 tools` при здоровой базовой стороне, отдающей девять
+/// (замер 25.11, раздел «Живой агент pi на местной модели» живого чек-листа): две дороги к одному ответу расходились, и расхождение
+/// выглядело как «продукт ничего не умеет».
+///
+/// Своей меры здесь нет: ответ целиком берётся у сочетания (`Combo::base_is_here`), и спрашивается он словом, а не `bool` — иначе
+/// у двух читателей опять оказалось бы два словаря.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bridge {
+    /// База на этой машине: мост поднимает своего ребёнка здесь.
+    Here,
+    /// База на другом компьютере: мост стоит там, а здесь — только труба к нему.
+    ThatSide,
+}
+
+impl Bridge {
+    pub fn of(combo: crate::cfg::Combo) -> Bridge {
         if combo.base_is_here() {
-            Toward::Child
+            Bridge::Here
         } else {
-            Toward::Channel(to_channel)
+            Bridge::ThatSide
         }
     }
 }
@@ -299,6 +327,30 @@ mod tests {
                 matches!(Toward::of(combo, channel.clone()), Toward::Channel(_)),
                 "{combo:?}: база на другом компьютере — труба в канал"
             );
+        }
+    }
+
+    /// Та же ось, но спрошенная словом (`Bridge`) — и это ТОТ ЖЕ вопрос, который задаёт поток подкоманды `mcp`
+    /// (`ops_host::run_mcp`). Сторож стоит на расхождении двух дорог: до 25.11 порт спрашивал ось, а поток не спрашивал её вовсе
+    /// и поднимал своего ребёнка даже там, где базы нет, — агент читал «0 инструментов» (замер живого `pi` 25.11). Таблица
+    /// называет все пять сочетаний: новое шестое покраснеет здесь, а не у человека на второй машине.
+    #[test]
+    fn both_roads_to_the_bridge_ask_one_question_where_the_base_is() {
+        use crate::cfg::Combo::*;
+        let channel: ToChannel = std::sync::Arc::new(|_, _| Err("в тесте канал не зовут".to_string()));
+        for combo in [Alone, AcceptBaseHere, DialBaseHere] {
+            assert_eq!(Bridge::of(combo), Bridge::Here, "{combo:?}");
+        }
+        for combo in [AcceptBaseThere, DialBaseThere] {
+            assert_eq!(Bridge::of(combo), Bridge::ThatSide, "{combo:?}");
+        }
+        // И обе дороги читают ответ одинаково: `Toward` собран из `Bridge`, а не из второй копии условия.
+        for combo in [Alone, AcceptBaseHere, DialBaseHere, AcceptBaseThere, DialBaseThere] {
+            let same = match Toward::of(combo, channel.clone()) {
+                Toward::Child => Bridge::Here,
+                Toward::Channel(_) => Bridge::ThatSide,
+            };
+            assert_eq!(same, Bridge::of(combo), "{combo:?}: порт и поток обязаны отвечать одно");
         }
     }
 

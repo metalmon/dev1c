@@ -5,19 +5,58 @@
 use std::process::Stdio;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-/// A plain relay to a local TCP port (the web server behind 779N). A port
+/// A plain relay to a local TCP port (the web server behind 779N; the
+/// connector's own MCP port when the base is on the other side). A port
 /// that does not answer is reported, not swallowed: from the container it
 /// looks exactly like a tunnel fault, and only this side can tell.
-pub async fn pipe_tcp<S>(stream: S, port: u16) -> Result<(), String>
+///
+/// `absent` — чего на порту не оказалось и что с этим делать, СЛОВАМИ ВЫЗЫВАЮЩЕГО: копировщик один на обе трубы, а чинит человек
+/// разное (поднять публикацию базы — или включить доступ к 1С, см. `ops_host::NO_LOCAL_ACCESS`), и выдумывать за вызывающего совет
+/// здесь было бы ложью одному из двух.
+pub async fn pipe_tcp<S>(stream: S, port: u16, absent: &str) -> Result<(), String>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
-        .await
-        .map_err(|e| format!("веб-сервер на порту {port} не отвечает ({e}) — публикация базы не поднята"))?;
+    let mut tcp =
+        tokio::net::TcpStream::connect(("127.0.0.1", port)).await.map_err(|e| format!("порт {port} не отвечает ({e}) — {absent}"))?;
     let mut stream = stream;
     let _ = tokio::io::copy_bidirectional(&mut stream, &mut tcp).await;
     Ok(())
+}
+
+/// Мост, которому вести вызов НЕКУДА: ребёнка он не поднимает и не пытается — каждому запросу агента отвечает причиной
+/// (`degraded_reply`, те же слова и те же формы ответа), пока агент не отключится.
+///
+/// **Заведён починкой 25.11 и закрывает вторую дорогу того же молчания.** Отказы трубы в канал (`peer::pipe_calls`: партнёра нет,
+/// книга не открылась, связь с той стороной не держится) говорились В ЖУРНАЛ, а поток агента просто ронялся — агент показывал
+/// человеку «сервер отключился», и ни причины, ни того, что причина названа, человек не узнавал. Теперь оба пути к мосту (поток
+/// подкоманды `mcp` и местный порт) при одном и том же «вести некуда» отвечают агенту словами.
+///
+/// `'static` и `Send` здесь не нужны (своей задачи функция не заводит), и это нарочно: зовущему хватает `&mut` своего потока,
+/// который он потом закроет сам.
+pub async fn refuse_calls<S>(stream: S, said: &str)
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (mut sr, mut sw) = tokio::io::split(stream);
+    let mut f = Framer::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = match sr.read(&mut buf).await {
+            Ok(0) | Err(_) => return,
+            Ok(n) => n,
+        };
+        for fr in f.push(&buf[..n]) {
+            let Frame::Line(l) = fr else { continue };
+            // `inject = false`: своих инструментов у этой трубы нет (они живут у моста vrunner той стороны), значит `tools/list`
+            // получит отказ словами, а не пустой список.
+            if let Some(reply) = degraded_reply(&l, false, said) {
+                if sw.write_all(&reply).await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 /// `mcp-1c.exe` as the bridge starts it: the kit's binary, the developer's
@@ -824,8 +863,7 @@ pub async fn pipe_jsonrpc<S>(
                                         if let Some(reply) = degraded_reply(
                                             l,
                                             rules.inject,
-                                            who,
-                                            "параметры сменились, а предыдущий вызов не завершился вовремя",
+                                            &not_running(who, "параметры сменились, а предыдущий вызов не завершился вовремя"),
                                         ) {
                                             let _ = out_tx.send(reply).await;
                                         }
@@ -982,13 +1020,20 @@ pub async fn pipe_jsonrpc<S>(
         }
     };
 
-    // Ребёнок ушёл, не ответив на tools/list: наши инструменты агент получает
-    // всё равно — но только у моста, который их вообще подмешивает.
+    // Ребёнок ушёл, не ответив на tools/list. Наши инструменты агент получает
+    // всё равно — но только у моста, который их вообще подмешивает; у 777N
+    // своих нет, и прежде этот `tools/list` не получал ОТВЕТА ВООБЩЕ. Молчать
+    // здесь нельзя по тому же закону, по которому нельзя отдавать пустой
+    // список (см. `degraded_reply`): агент ждёт ответа, а дождался бы разрыва
+    // соединения без слов. Теперь — ошибка с причиной, той же формулировкой.
     let unanswered: Vec<Value> = pending.lock().unwrap().drain().map(|(_, (id, _))| id).collect();
-    if rules.inject {
-        for id in unanswered {
-            let _ = out_tx.send(jsonrpc::list_reply(&id, jsonrpc::our_tools())).await;
-        }
+    for id in unanswered {
+        let reply = if rules.inject {
+            jsonrpc::list_reply(&id, jsonrpc::our_tools())
+        } else {
+            jsonrpc::error_reply(&id, SERVER_ERROR, &not_running(who, "процесс закончился, не ответив на список инструментов"))
+        };
+        let _ = out_tx.send(reply).await;
     }
     // Свои задачи дорабатывают: их ответы ещё могут дойти до агента.
     let ours: Vec<_> = running.lock().unwrap().drain().map(|(_, h)| h).collect();
@@ -1371,14 +1416,34 @@ fn capture_handshake(line: &[u8], handshake: &HandshakeCell) {
     }
 }
 
+/// Код JSON-RPC «ошибка на нашей стороне» (`-32603`, internal error) — им
+/// отвечается `tools/list`, когда списка нет вовсе: агент обязан прочитать
+/// ОТКАЗ, а не успешный ответ с нулём инструментов.
+const SERVER_ERROR: i64 = -32603;
+
+/// Слова отказа «мост есть, ребёнка нет» — одни на `tools/list` и на
+/// `tools/call`: читатель чинит одно и то же, и две формулировки одной
+/// причины расходились бы молча.
+fn not_running(who: &str, why: &str) -> String {
+    format!("мост 1c-connect: {who} не запускается ({why}) — исправьте и повторите")
+}
+
 /// Пока ребёнка нет (запуск не удался) — читаемый ответ вместо тишины или
 /// разрыва соединения: иначе Zed решит, что сервер упал, и человеку придётся
-/// руками поднимать оба порта заново. `initialize`/`tools/list` отвечают
-/// так, будто сервер жив (свои инструменты — свои, их и спрашивать не у
-/// кого, в списке только они, у 777N — пусто), `tools/call` и всё прочее
-/// именованное с `id` — явным отказом с причиной; уведомление (нет `id`) —
-/// отвечать нечем, и это не повод для записи в журнал.
-fn degraded_reply(line: &[u8], inject: bool, who: &str, why: &str) -> Option<Vec<u8>> {
+/// руками поднимать оба порта заново. `initialize` отвечает так, будто сервер
+/// жив, `tools/call` и всё прочее именованное с `id` — явным отказом с
+/// причиной; уведомление (нет `id`) — отвечать нечем, и это не повод для
+/// записи в журнал.
+///
+/// **`tools/list` отвечает СПИСКОМ только там, где список непуст** (починка
+/// 25.11). У 778N это свои инструменты — их и спрашивать не у кого, они есть
+/// всегда. У 777N своих нет, и прежде здесь отдавался пустой список: ответ
+/// по форме успешный, а по смыслу — тишина в его одежде. Человек читал
+/// `1c: connected, 0 tools` и заключал, что продукт не умеет ничего, тогда
+/// как причина была названа — только некому (замер живого агента `pi` 25.11).
+/// Пустой список инструментов этой функцией больше невыразим: нет своих —
+/// значит ошибка JSON-RPC с причиной, и её агент покажет человеку.
+fn degraded_reply(line: &[u8], inject: bool, said: &str) -> Option<Vec<u8>> {
     let v: Value = serde_json::from_slice(line).ok()?;
     let method = v.get("method")?.as_str()?.to_string();
     let id = v.get("id").cloned();
@@ -1394,10 +1459,10 @@ fn degraded_reply(line: &[u8], inject: bool, who: &str, why: &str) -> Option<Vec
         Some(out)
     } else if method.eq_ignore_ascii_case("tools/list") {
         let id = id?;
-        Some(jsonrpc::list_reply(&id, if inject { jsonrpc::our_tools() } else { Vec::new() }))
+        Some(if inject { jsonrpc::list_reply(&id, jsonrpc::our_tools()) } else { jsonrpc::error_reply(&id, SERVER_ERROR, said) })
     } else {
         let id = id?;
-        Some(jsonrpc::text_reply(&id, &format!("мост 1c-connect: {who} не запускается ({why}) — исправьте и повторите"), true))
+        Some(jsonrpc::text_reply(&id, said, true))
     }
 }
 
@@ -1492,12 +1557,13 @@ async fn wait_and_reply_degraded<R>(
 where
     R: AsyncRead + Unpin,
 {
+    let said = not_running(who, reason);
     loop {
         if !pending_frames.is_empty() {
             let fr = pending_frames.pop_front().unwrap();
             if let Frame::Line(l) = &fr {
                 capture_handshake(l, handshake);
-                if let Some(reply) = degraded_reply(l, inject, who, reason) {
+                if let Some(reply) = degraded_reply(l, inject, &said) {
                     let _ = out_tx.send(reply).await;
                 }
             }
@@ -3415,9 +3481,68 @@ mod tests {
         dead.bind("127.0.0.1:0".parse().unwrap()).unwrap();
         let port = dead.local_addr().unwrap().port();
         let (_ours, theirs) = tokio::io::duplex(64);
-        let r = pipe_tcp(theirs, port).await;
+        let r = pipe_tcp(theirs, port, "публикация базы не поднята").await;
         assert!(r.is_err(), "connect to a closed port must be an error");
-        assert!(r.unwrap_err().contains(&port.to_string()));
+        let why = r.unwrap_err();
+        assert!(why.contains(&port.to_string()), "{why}");
+        assert!(why.contains("публикация базы не поднята"), "совет вызывающего обязан дойти до человека: {why}");
+    }
+
+    /// Та же труба, но вторым её вызывающим: поток подкоманды `mcp` при базе на той стороне (`ops_host::run_mcp`). Совет здесь
+    /// ДРУГОЙ — включить доступ к 1С, а не поднимать публикацию, — и сторож стоит именно на этом: один копировщик, слова по
+    /// вызывающему. Прежде труба знала один совет на всех, и второму вызывающему она соврала бы про публикацию.
+    #[tokio::test]
+    async fn the_mcp_road_to_a_dead_local_port_advises_turning_access_on() {
+        let dead = tokio::net::TcpSocket::new_v4().unwrap();
+        dead.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let port = dead.local_addr().unwrap().port();
+        let (_ours, theirs) = tokio::io::duplex(64);
+        let why = pipe_tcp(theirs, port, crate::ops_host::NO_LOCAL_ACCESS).await.expect_err("мёртвый порт — отказ, а не тишина");
+        assert!(why.contains(&port.to_string()), "{why}");
+        assert!(why.contains("доступ к 1С здесь не включён"), "{why}");
+    }
+
+    /// **Пустой список инструментов невыразим.** У моста без своих инструментов (777N, `mcp-1c`) `tools/list` отвечается ОШИБКОЙ
+    /// с причиной, а не успешным ответом с нулём инструментов: человек, читающий «connected, 0 tools», заключает, что продукт не
+    /// умеет ничего (замер живого агента `pi` 25.11, 0 инструментов при девяти у здоровой базовой стороны).
+    ///
+    /// У моста со своими (778N, `vrunner-mcp`) список остаётся списком — он непуст всегда, в нём как минимум наши три.
+    #[test]
+    fn a_bridge_with_no_child_answers_tools_list_with_words_not_an_empty_list() {
+        let list = br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let said = not_running("mcp-1c", "публикация базы ещё не поднята");
+
+        let out = degraded_reply(list, false, &said).expect("ответ обязателен");
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        assert!(v.get("result").is_none(), "успешного ответа тут быть не должно: {v}");
+        let message = v.pointer("/error/message").and_then(Value::as_str).expect("слова причины: {v}");
+        assert_eq!(message, said, "агент обязан прочитать ту же причину, что человек в журнале");
+
+        let ours: Value = serde_json::from_slice(&degraded_reply(list, true, &said).unwrap()).unwrap();
+        let tools = ours.pointer("/result/tools").and_then(Value::as_array).expect("у 778N список: {ours}");
+        assert!(!tools.is_empty(), "свои инструменты есть всегда — список не бывает пустым");
+    }
+
+    /// Труба, которой вести вызов некуда (`peer::pipe_calls`: партнёра нет, связь не держится): агент получает СЛОВА на каждый
+    /// запрос — и на `tools/list`, и на `tools/call`, — а не разорванное соединение. До 25.11 поток просто ронялся, и причина,
+    /// названная в журнале, до агента не доходила вовсе.
+    #[tokio::test]
+    async fn a_pipe_with_nowhere_to_lead_says_the_reason_to_the_agent() {
+        let said = "Вызов агента некуда вести: связь с той стороной сейчас не держится.";
+        let (ours, theirs) = tokio::io::duplex(64 * 1024);
+        let refuser = tokio::spawn(async move { refuse_calls(theirs, said).await });
+        let (r, mut w) = tokio::io::split(ours);
+        w.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n").await.unwrap();
+        w.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"cf_load\"}}\n").await.unwrap();
+        let mut lines = tokio::io::BufReader::new(r).lines();
+        let first: Value = serde_json::from_str(&lines.next_line().await.unwrap().expect("ответ на список")).unwrap();
+        assert_eq!(first.pointer("/error/message").and_then(Value::as_str), Some(said), "{first}");
+        let second: Value = serde_json::from_str(&lines.next_line().await.unwrap().expect("ответ на вызов")).unwrap();
+        assert_eq!(second.pointer("/result/content/0/text").and_then(Value::as_str), Some(said), "{second}");
+        assert_eq!(second.pointer("/result/isError").and_then(Value::as_bool), Some(true), "{second}");
+        drop(w);
+        drop(lines);
+        refuser.await.unwrap();
     }
 
     #[tokio::test]
@@ -3431,7 +3556,7 @@ mod tests {
             s.write_all(b"pong!").await.unwrap();
         });
         let (ours, theirs) = tokio::io::duplex(1024);
-        tokio::spawn(pipe_tcp(theirs, port));
+        tokio::spawn(async move { pipe_tcp(theirs, port, "публикация базы не поднята").await });
         let (mut r, mut w) = tokio::io::split(ours);
         w.write_all(b"ping!").await.unwrap();
         let mut b = [0u8; 5];

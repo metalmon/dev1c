@@ -1819,6 +1819,15 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
     /// `refuse_unless_ours`, различая «никого нет» (не отказ) от «есть
     /// кто-то неизвестный» (отказ при любом пароле). Здесь — именно случай
     /// владельца: пусто, пароля нет, страж не отказывает.
+    ///
+    /// **Порт — из `ports::test_port`, а не из `filled_for_test`** (замер
+    /// 25.11): умолчание отдаёт `derived_http_port()` = 8081, то есть
+    /// НАСТОЯЩИЙ порт публикации на машине, и на машине с поднятым стендом
+    /// страж видел там чужого слушателя — `Guard::Refuse` вместо
+    /// `NotPublished`, тест краснел у всех, у кого стенд живой, и зеленел у
+    /// тех, у кого он погашен. Ровно тот случай, про который предупреждает
+    /// докстрока `ports::test_port`: номер теста не вправе быть номером
+    /// живой программы.
     #[test]
     fn guard_lets_an_empty_publication_through_when_no_password_is_set_either() {
         let dir = std::env::temp_dir().join(format!("dev1c-guard-no-password-{}", std::process::id()));
@@ -1827,6 +1836,7 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         let mut cfg = crate::cfg::filled_for_test();
         cfg.current_mut().publication = "auto".into();
         cfg.current_mut().db_password = String::new();
+        cfg.current_mut().http_port = Some(crate::ports::test_port());
         assert!(
             ops_host::with_state_dir_for_test(&dir, || guard_own_listener(&cfg, &kit)).is_not_published(),
             "никто не слушает и pid-файла нет — публикация просто не поднята, это не отказ"

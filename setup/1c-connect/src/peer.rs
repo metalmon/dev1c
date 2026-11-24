@@ -1064,7 +1064,8 @@ async fn accepting(node: Node, channels: Channels, kit: Kit, tx: UnboundedSender
     )
     .await;
 }
-/// Увести местное соединение агента в канал: открыть поток, поздороваться заголовком и перелить байты.
+/// Увести местное соединение агента в канал: открыть поток, поздороваться заголовком и перелить байты. Открывает и переливает
+/// `open_calls` ниже; здесь остаётся то, что делать, когда вести вызов НЕКУДА, — сказать причину человеку и агенту.
 ///
 /// **Чего здесь нет нарочно.** Ни одного правила моста: ни белого списка инструментов, ни подмешивания своих, ни пересоздания ребёнка.
 /// Мост стоит на той стороне, у базы, и это и есть граница работы — «меняется труба, а не механизм» (спека протокола, раздел «MCP»).
@@ -1082,41 +1083,38 @@ async fn pipe_calls(
     kind: crate::ops_host::McpServer,
     mut stream: tokio::net::TcpStream,
 ) {
-    let partners = match Partners::open(kit.state()) {
-        Ok(p) => p,
-        Err(e) => {
-            say(tx, common::Event::Fail(e));
-            return;
-        }
-    };
+    // Отказ говорится ДВАЖДЫ и обеими дорогами, какими тут вообще говорят: в журнал — человеку, и в сам поток вызовов — агенту
+    // (`bridge::refuse_calls`). Прежде поток молча ронялся, и агент показывал человеку «сервер отключился» вместо названной
+    // причины — то же молчание, что отдавало «0 инструментов» (починка 25.11, см. `listen::Bridge`).
+    if let Err(no) = open_calls(kit, channels, card, kind, &mut stream).await {
+        let words = match &no {
+            common::Event::Fail(t) | common::Event::Warn(t) => t.clone(),
+            other => format!("{other:?}"),
+        };
+        say(tx, no);
+        crate::bridge::refuse_calls(&mut stream, &words).await;
+    }
+}
+
+/// Открыть вызовы к той стороне и прокачать их до конца. `Err` — вести вызов некуда, и в нём СЛОВА причины той строгости, какой
+/// она есть в журнале: открыть книгу допуска не удалось — отказ (`Fail`), партнёра нет или связь не держится — предупреждение.
+async fn open_calls(
+    kit: &Kit,
+    channels: &Channels,
+    card: &CardId,
+    kind: crate::ops_host::McpServer,
+    stream: &mut tokio::net::TcpStream,
+) -> Result<(), common::Event> {
+    let partners = Partners::open(kit.state()).map_err(common::Event::Fail)?;
     // Книга открывается ЗДЕСЬ, а не держится снимком: `open` перечитывает файл под замком, и список зачисленных у неё свежий.
     // Решение о ДОПУСКЕ по этому списку не принимается (на это есть `enrolled_to`, читающий диск под каждый вопрос) — здесь
     // решается, куда уходит НАШ вызов, а отозванная сторона отсечётся там, где допуск и спрашивают: у себя (`Admission::of`).
-    let book = match Book::open(kit.state()) {
-        Ok(b) => b,
-        Err(e) => {
-            say(tx, common::Event::Fail(e));
-            return;
-        }
-    };
-    let route = match crate::enrolled::route(partners.route_of(card), &book.of(card)) {
-        Ok(route) => route,
-        Err(words) => {
-            say(tx, common::Event::Warn(words.to_string()));
-            return;
-        }
-    };
+    let book = Book::open(kit.state()).map_err(common::Event::Fail)?;
+    let route = crate::enrolled::route(partners.route_of(card), &book.of(card)).map_err(|w| common::Event::Warn(w.to_string()))?;
     let Some(channel) = channels.of(route.key) else {
-        say(tx, common::Event::Warn("Вызов агента некуда вести: связь с той стороной сейчас не держится.".to_string()));
-        return;
+        return Err(common::Event::Warn("Вызов агента некуда вести: связь с той стороной сейчас не держится.".to_string()));
     };
-    let mut control = match channel.call().await {
-        Ok(c) => c,
-        Err(e) => {
-            say(tx, common::Event::Warn(e));
-            return;
-        }
-    };
+    let mut control = channel.call().await.map_err(common::Event::Warn)?;
     let opened = {
         let (send, recv) = control.halves();
         match crate::wire::Frame::write(send, &crate::wire::Msg::McpOpen { base_id: route.base, kind }).await {
@@ -1131,15 +1129,15 @@ async fn pipe_calls(
         }
     };
     if let Err(why) = opened {
-        say(tx, common::Event::Warn(why));
         control.end(None).await;
-        return;
+        return Err(common::Event::Warn(why));
     }
     // Половины уезжают в трубу вместе с держателем канала: пока идут вызовы, канал закрыться не вправе.
     let (send, recv, hold) = crate::channel::into_pipe(control);
     let mut theirs = tokio::io::join(recv, send);
-    let _ = tokio::io::copy_bidirectional(&mut stream, &mut theirs).await;
+    let _ = tokio::io::copy_bidirectional(stream, &mut theirs).await;
     drop(hold);
+    Ok(())
 }
 
 /// Обслужить поток ВЫЗОВОВ: та сторона открыла его к нашей карточке и назвала, какой из серверов инструментов ей нужен.

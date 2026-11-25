@@ -2508,8 +2508,8 @@ fn launched(kit: Kit, start: Start) -> anyhow::Result<()> {
     // Круг исправления задачи 1 плана «тонкий срез ценности»: окно — своя
     // точка загрузки `Cfg`, не общая с CLI (`main.rs::make_ctx`) и не с
     // подкомандой `mcp` (`ops_host::run_mcp`) — см. докстроку
-    // `ops_host::settle_chosen_http_port`.
-    ops_host::settle_chosen_http_port(&mut cfg, &kit);
+    // `ops_host::settle_chosen_ports`.
+    ops_host::settle_chosen_ports(&mut cfg, &kit);
     // Тот же единственный владелец на учётную запись, что у `connect`/`serve` (задача 14: было — сеанс) — см.
     // `crate::single_instance`. Вторая копия окна (двойной щелчок или автозапуск при живом трее) на Windows тихо поднимает окно
     // первой и выходит, если первая в ТОМ ЖЕ сеансе; из чужого сеанса она получает отказ словами, слова эти называют сеанс

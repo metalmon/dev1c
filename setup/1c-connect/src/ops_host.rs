@@ -224,6 +224,25 @@ pub fn settle_chosen_http_port_in(dir: &Path, cfg: &mut Cfg, ours: &crate::publi
     }
 }
 
+/// Сдвиг троицы портов моста — в `Cfg`, тем же приёмом и в том же месте, что
+/// порт публикации: дальше его читает `Cfg::ports()`, а значит все семеро её
+/// читателей, и добирать его каждому порознь не нужно.
+///
+/// Проба занятости — параметром, а не `ports::port_is_busy` прямо: иначе тест
+/// этой функции мерил бы настоящие `7771`/`7781`/`7791` на машине
+/// разработчика и отвечал бы по-разному в зависимости от того, запущен ли там
+/// живой коннектор.
+///
+/// Отказ подбора молча оставляет `None` — тогда `ports()` отдаёт прежние
+/// числа, и мост откажется словами при `bind` (`listen::busy_port_text`).
+/// Своего отказа здесь нет нарочно: улаживание зовут пять дорог, и ни одна из
+/// них не про порты.
+pub(crate) fn settle_bridge_shift_in(dir: &Path, cfg: &mut Cfg, busy: &dyn Fn(u16) -> bool) {
+    if let Ok(shift) = crate::ports::shift(dir, busy) {
+        cfg.resolved_bridge_shift = Some(shift);
+    }
+}
+
 /// Каталог состояния, подставленный тестом: потоко-локальная переменная,
 /// которую тест ставит сам (`with_state_dir_for_test`). Живёт только в
 /// тестовой сборке.
@@ -271,7 +290,7 @@ pub(crate) mod test_state_dir {
 
 /// Поставить тестовый каталог состояния на время вызова — см.
 /// `test_state_dir`. Тест, который её не зовёт, получает прежнее поведение:
-/// `settle_chosen_http_port` ничего не делает, а страж
+/// `settle_chosen_ports` ничего не делает, а страж
 /// (`publication::guard_own_listener`) смотрит в заведомо несуществующий
 /// каталог и отказывает словами. В настоящий `%LOCALAPPDATA%` прогон не
 /// пишет ни в том, ни в другом случае.
@@ -285,8 +304,10 @@ pub(crate) fn with_state_dir_for_test<T>(dir: &Path, f: impl FnOnce() -> T) -> T
 /// `test_state_dir`: прежде здесь была пустышка, теперь — подмена, которую
 /// тест ставит сам).
 #[cfg(not(test))]
-pub fn settle_chosen_http_port(cfg: &mut Cfg, kit: &Kit) {
-    settle_chosen_http_port_in(&state_dir(), cfg, &crate::publication::OurHttpd::of(&kit.root));
+pub fn settle_chosen_ports(cfg: &mut Cfg, kit: &Kit) {
+    let dir = state_dir();
+    settle_chosen_http_port_in(&dir, cfg, &crate::publication::OurHttpd::of(&kit.root));
+    settle_bridge_shift_in(&dir, cfg, &crate::ports::port_is_busy);
 }
 
 /// Та же обёртка в тестовой сборке: каталог берётся из потоко-локальной
@@ -296,9 +317,10 @@ pub fn settle_chosen_http_port(cfg: &mut Cfg, kit: &Kit) {
 /// (живой случай: `gui::save` так и сломался, прочитав чужой, настоящий
 /// выбор).
 #[cfg(test)]
-pub fn settle_chosen_http_port(cfg: &mut Cfg, kit: &Kit) {
+pub fn settle_chosen_ports(cfg: &mut Cfg, kit: &Kit) {
     if let Some(dir) = test_state_dir::get() {
         settle_chosen_http_port_in(&dir, cfg, &crate::publication::OurHttpd::of(&kit.root));
+        settle_bridge_shift_in(&dir, cfg, &crate::ports::port_is_busy);
     }
 }
 
@@ -381,7 +403,7 @@ pub fn write_derived_fields(kit: &Kit, cfg: &mut Cfg, dry_run: bool) -> Result<V
     if cfg.current().http_port.is_none() {
         // `cfg.http_port()` отдаёт УЛАЖЕННЫЙ порт сеанса, когда он уже
         // подобран (а к этому моменту он подобран всегда — оба вызывающих
-        // идут после `settle_chosen_http_port`). В файл человека идёт
+        // идут после `settle_chosen_ports`). В файл человека идёт
         // умолчание первой попытки (`derived_http_port`), а не то, что
         // случайно оказалось свободно в этом сеансе — иначе поле становится
         // явным предпочтением человека, расходящимся с запомненным выбором
@@ -2003,8 +2025,8 @@ pub fn run_mcp(server: McpServer, kit: Kit) -> Result<()> {
     let mut cfg = Cfg::load(&kit)?;
     // Круг исправления задачи 1 плана «тонкий срез ценности»: подкоманда
     // `mcp` не идёт через `make_ctx` (та ветка в `main.rs` возвращает раньше
-    // неё) — свой вызов `settle_chosen_http_port`, не общий с CLI.
-    settle_chosen_http_port(&mut cfg, &kit);
+    // неё) — свой вызов `settle_chosen_ports`, не общий с CLI.
+    settle_chosen_ports(&mut cfg, &kit);
     // Межпроцессная часть замка проекта: без этого вызова второй
     // долгоживущий процесс (Zed и pi, запущенные разом) его вовсе не увидит
     // (см. тот же вызов в `main.rs::connect`).
@@ -3202,7 +3224,7 @@ mod tests {
 
     /// Круг исправления финального ревью, С2: к моменту установки улаженный
     /// порт сеанса (`resolved_http_port`) ВСЕГДА заполнен — оба вызывающих
-    /// идут после `settle_chosen_http_port`. `cfg.http_port()` предпочитает
+    /// идут после `settle_chosen_ports`. `cfg.http_port()` предпочитает
     /// его, и старый код клал в файл человека именно его — сеансовый выбор
     /// ("второй бухгалтер, 8081 занят, подбор увёл на 8082"), а не умолчание
     /// первой попытки, как требует докстрока поля (`cfg.rs`, `http_port`).
@@ -3217,7 +3239,7 @@ mod tests {
         let mut cfg: Cfg = toml::from_str(&text).unwrap();
         assert_eq!(cfg.current().http_port, None, "поле человека пусто — установка впервые выбирает умолчание");
         // 8081 занят соседом, подбор этого сеанса увёл на 8082 — ровно то,
-        // что кладёт `settle_chosen_http_port` перед установкой.
+        // что кладёт `settle_chosen_ports` перед установкой.
         cfg.resolved_http_port = Some(8082);
 
         let wrote = write_derived_fields(&kit, &mut cfg, false).unwrap();
@@ -3838,7 +3860,7 @@ mod tests {
 
     /// Круг исправления 2, пункт 2: правило («выбранный порт побеждает
     /// выведенный») проверяется на `_in` во временном каталоге — без похода
-    /// на настоящую машину (`settle_chosen_http_port`, тонкая обёртка
+    /// на настоящую машину (`settle_chosen_ports`, тонкая обёртка
     /// настоящим `state_dir()`, остаётся no-op в тестах, см. её докстроку).
     /// Занимаем предпочтительный порт реальным слушателем — `ports::choose`
     /// обязана уйти на следующий свободный, и `http_port()`/`base_url()`

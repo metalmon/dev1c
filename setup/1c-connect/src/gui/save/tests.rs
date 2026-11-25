@@ -108,7 +108,7 @@ fn carried_dump_follows_the_project_unless_it_was_chosen_by_hand() {
 }
 
 /// Каталог состояния для тестов, которым улаживание порта
-/// (`ops_host::settle_chosen_http_port`) нужно НАСТОЯЩИМ, а не пустышкой
+/// (`ops_host::settle_chosen_ports`) нужно НАСТОЯЩИМ, а не пустышкой
 /// (находка 8 ревью круга 3). Ставится потоко-локально, переменные среды не
 /// трогаются — это жёсткий запрет владельца.
 fn state_dir_for(name: &str) -> std::path::PathBuf {

@@ -662,6 +662,13 @@ pub struct Cfg {
     /// ниже предпочитает это поле, когда оно есть.
     #[serde(skip)]
     pub resolved_http_port: Option<u16>,
+    /// Сдвиг троицы портов моста, выбранный для ЭТОЙ учётной записи
+    /// (`ports::shift`), — `None`, пока его никто не проставил, и тогда
+    /// `ports()` отдаёт прежние числа. `#[serde(skip)]` по тому же доводу,
+    /// что у `resolved_http_port`: это не настройка человека, а то, что
+    /// досталось учётке на машине, и в toml этому места нет.
+    #[serde(skip)]
+    pub resolved_bridge_shift: Option<u16>,
 }
 
 /// Пароль, который при чтении не открылся: ЧЕЙ и КАКОЙ. До задачи 10 это был
@@ -845,7 +852,15 @@ impl TryFrom<CfgFile> for Cfg {
                 _ => WriteCeiling::ReadOnly,
             }
         });
-        Ok(Cfg { current, write, connections, undecryptable: Vec::new(), read_notes, resolved_http_port: None })
+        Ok(Cfg {
+            current,
+            write,
+            connections,
+            undecryptable: Vec::new(),
+            read_notes,
+            resolved_http_port: None,
+            resolved_bridge_shift: None,
+        })
     }
 }
 
@@ -866,6 +881,7 @@ impl std::fmt::Debug for Cfg {
             .field("connections", &self.connections)
             .field("undecryptable", &self.undecryptable)
             .field("resolved_http_port", &self.resolved_http_port)
+            .field("resolved_bridge_shift", &self.resolved_bridge_shift)
             .finish()
     }
 }
@@ -2271,26 +2287,28 @@ impl Cfg {
         }
     }
 
-    /// Порты моста для МЕСТНОЙ работы: `mcp`/`vrunner`/`web` — с задачи 6
-    /// плана «тонкий срез ценности» константы, те же числа, что раньше
-    /// давало ПУСТОЕ имя рабочего места (`7771`/`7781`/`7791`). Имя рабочего
-    /// места их больше не считает вовсе: `mcp` и `vrunner` — номера, которые
-    /// человек своей рукой вписал в агентский харнес (Zed, Codex, Claude
-    /// Code) на ЭТОЙ машине, и смена числа увела бы их у всех живых местных
-    /// установок разом (решение владельца 2.11). Настоящего подбора при
-    /// занятости эта тройка пока не получила (задача 1 плана «тонкий срез
-    /// ценности» вяжет только `http` — `publication::Paths::of`) — это дело
-    /// `ports::choose`, когда до него дойдёт очередь.
+    /// Порты моста для МЕСТНОЙ работы: `mcp`/`vrunner`/`web` — основания
+    /// (`ports::BRIDGE`, те же `7771`/`7781`/`7791`) плюс сдвиг, доставшийся
+    /// этой УЧЁТНОЙ ЗАПИСИ (`resolved_bridge_shift`). Имя рабочего места их
+    /// не считает: оно ушло вместе с полем.
     ///
-    /// Для ТУННЕЛЬНОГО режима эта функция не годится — рядом `tunnel_ports()`,
-    /// и граница между ними в сигнатуре, не в комментарии: эта всегда
-    /// константа, та всегда считает от рабочего места. Перепутать их молча
-    /// нельзя — это ровно находка Б3 круга исправления финального ревью:
-    /// задача 6 сделала константой и местную работу, и туннель разом, а
-    /// туннель читает чужое поле (`current().workstation`), которое с константой
-    /// не согласовано.
+    /// Первая учётка на машине получает сдвиг 0, то есть прежние числа, и это
+    /// не случайность, а требование: `mcp` и `vrunner` человек своей рукой
+    /// вписал в агентский харнес (Zed, Codex, Claude Code), и смена числа
+    /// увела бы их у всех живых установок разом (решение владельца 2.11).
+    /// Сдвиг достаётся только второй учётке — той, что пришла на занятое; без
+    /// него она не работала бы вовсе («порт 7771 занят процессом…»), а схема
+    /// «несколько учёток, у каждой свой комплект, живут независимо» требует
+    /// обратного.
+    ///
+    /// Сдвиг проставляет `ops_host::settle_chosen_ports` — там же, где и порт
+    /// публикации, и тем же пятым вызовом на все дороги: читателей у этой
+    /// функции семеро, и добирать сдвиг каждому порознь означало бы семь
+    /// шансов забыть.
     pub fn ports(&self) -> Ports {
-        Ports { mcp: 7771, vrunner: 7781, web: 7791 }
+        let s = self.resolved_bridge_shift.unwrap_or(0);
+        let [mcp, vrunner, web] = crate::ports::BRIDGE.map(|b| b + s);
+        Ports { mcp, vrunner, web }
     }
 
     /// ПРЕДПОЧТЕНИЕ порта публикации — то, чего человек хочет сейчас (явный
@@ -2309,7 +2327,7 @@ impl Cfg {
     /// дело — явный порт или вывод, не то, что выбрал `ports::choose`.
     ///
     /// Одна сборка на обоих вызывающих (`publication::Paths::of`,
-    /// `ops_host::settle_chosen_http_port`) — врозь они дважды повторяли бы
+    /// `ops_host::settle_chosen_ports`) — врозь они дважды повторяли бы
     /// одно и то же правило «явный порт человека, иначе выведенный».
     pub fn first_attempt_ports(&self) -> crate::ports::Chosen {
         crate::ports::Chosen { http: self.current().http_port.unwrap_or_else(derived_http_port) }
@@ -2333,7 +2351,7 @@ impl Cfg {
     /// явный `http_port` человека, иначе `derived_http_port` — умолчание
     /// ПЕРВОЙ попытки подбора. Эта функция сама подбор никогда не запускает
     /// (это сеть и диск, а не чистое чтение полей) — только читает то, что
-    /// в `resolved_http_port` уже положил `ops_host::settle_chosen_http_port`.
+    /// в `resolved_http_port` уже положил `ops_host::settle_chosen_ports`.
     pub fn http_port(&self) -> u16 {
         self.resolved_http_port.unwrap_or_else(|| self.current().http_port.unwrap_or_else(derived_http_port))
     }
@@ -3623,6 +3641,18 @@ mod tests {
     /// — не «красивыми» 7770/7780/7790/8080. Довод владельца 2.11: `mcp` и
     /// `vrunner` люди своей рукой вписали в агентские харнесы, и смена
     /// константы увела бы порты у всех живых установок разом.
+    /// Сдвиг, доставшийся учётке, обязан ДОЕХАТЬ до тройки — иначе подбор
+    /// есть, а мост всё равно встаёт на 7771. Именно эта дорога и
+    /// отсутствовала: порты моста были константами у всех семи читателей
+    /// `ports()`.
+    #[test]
+    fn the_shift_an_account_got_reaches_the_triple() {
+        let mut c = Cfg::default();
+        assert_eq!((c.ports().mcp, c.ports().vrunner, c.ports().web), (7771, 7781, 7791), "без сдвига — прежние числа");
+        c.resolved_bridge_shift = Some(2);
+        assert_eq!((c.ports().mcp, c.ports().vrunner, c.ports().web), (7773, 7783, 7793), "сдвиг двинул ВСЮ тройку, а не один порт");
+    }
+
     #[test]
     fn the_four_preferred_ports_keep_the_numbers_an_empty_workstation_used_to_give() {
         let p = Cfg::default().ports();
@@ -3687,7 +3717,7 @@ mod tests {
 
     /// Круг исправления задачи 1 плана «тонкий срез ценности»: выбранный в
     /// этом сеансе порт (`resolved_http_port`, который проставляет
-    /// `ops_host::settle_chosen_http_port`) побеждает И явный `http_port`
+    /// `ops_host::settle_chosen_ports`) побеждает И явный `http_port`
     /// человека, И выведенный — иначе `base_url()` называл бы не тот порт,
     /// на котором на самом деле поднят httpd (`publication::Paths::of`
     /// читает его же выбором, `ports::choose`), и агент шёл бы в молчание.

@@ -228,17 +228,22 @@ pub fn settle_chosen_http_port_in(dir: &Path, cfg: &mut Cfg, ours: &crate::publi
 /// порт публикации: дальше его читает `Cfg::ports()`, а значит все семеро её
 /// читателей, и добирать его каждому порознь не нужно.
 ///
-/// Проба занятости — параметром, а не `ports::port_is_busy` прямо: иначе тест
-/// этой функции мерил бы настоящие `7771`/`7781`/`7791` на машине
-/// разработчика и отвечал бы по-разному в зависимости от того, запущен ли там
-/// живой коннектор.
+/// Проба занятости и признак живого коннектора — параметрами, а не зовом
+/// `ports::port_is_busy`/`allow::connector_alive` прямо: иначе тест этой
+/// функции мерил бы настоящие `7771`/`7781`/`7791` на машине разработчика и
+/// отвечал бы по-разному в зависимости от того, запущен ли там живой
+/// коннектор.
+///
+/// Живым считается и коннектор, обслуживающий ДРУГОЙ комплект
+/// (`door::Served::Another`): порты — ресурс учётной записи, а не комплекта, и
+/// занимает он их той же тройкой. Один `No` значит «нашего нет».
 ///
 /// Отказ подбора молча оставляет `None` — тогда `ports()` отдаёт прежние
 /// числа, и мост откажется словами при `bind` (`listen::busy_port_text`).
 /// Своего отказа здесь нет нарочно: улаживание зовут пять дорог, и ни одна из
 /// них не про порты.
-pub(crate) fn settle_bridge_shift_in(dir: &Path, cfg: &mut Cfg, busy: &dyn Fn(u16) -> bool) {
-    if let Ok(shift) = crate::ports::shift(dir, busy) {
+pub(crate) fn settle_bridge_shift_in(dir: &Path, cfg: &mut Cfg, busy: &dyn Fn(u16) -> bool, connector_alive: bool) {
+    if let Ok(shift) = crate::ports::shift(dir, busy, connector_alive) {
         cfg.resolved_bridge_shift = Some(shift);
     }
 }
@@ -307,7 +312,7 @@ pub(crate) fn with_state_dir_for_test<T>(dir: &Path, f: impl FnOnce() -> T) -> T
 pub fn settle_chosen_ports(cfg: &mut Cfg, kit: &Kit) {
     let dir = state_dir();
     settle_chosen_http_port_in(&dir, cfg, &crate::publication::OurHttpd::of(&kit.root));
-    settle_bridge_shift_in(&dir, cfg, &crate::ports::port_is_busy);
+    settle_bridge_shift_in(&dir, cfg, &crate::ports::port_is_busy, !matches!(crate::allow::connector_alive(kit), crate::door::Served::No));
 }
 
 /// Та же обёртка в тестовой сборке: каталог берётся из потоко-локальной
@@ -320,7 +325,12 @@ pub fn settle_chosen_ports(cfg: &mut Cfg, kit: &Kit) {
 pub fn settle_chosen_ports(cfg: &mut Cfg, kit: &Kit) {
     if let Some(dir) = test_state_dir::get() {
         settle_chosen_http_port_in(&dir, cfg, &crate::publication::OurHttpd::of(&kit.root));
-        settle_bridge_shift_in(&dir, cfg, &crate::ports::port_is_busy);
+        settle_bridge_shift_in(
+            &dir,
+            cfg,
+            &crate::ports::port_is_busy,
+            !matches!(crate::allow::connector_alive(kit), crate::door::Served::No),
+        );
     }
 }
 

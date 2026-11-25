@@ -45,7 +45,8 @@ impl Live {
     /// (`ops_host::watch_mcp`), бил бы поколение на каждый тик, и
     /// `bridge::pipe_jsonrpc` рестартовал бы ребёнка практически на каждый
     /// вызов инструмента вместо «после правки параметров».
-    /// Выбранный в этом сеансе порт (`Cfg::resolved_http_port`) — факт
+    /// Выбранное в этом сеансе — улаженный порт публикации и доставшийся
+    /// учётке сдвиг моста (`Cfg::carry_session_facts` называет их все) — факт
     /// СЕАНСА, не файла, и перечитывание toml не вправе его стирать (круг
     /// исправления 2, пункт 4): `watch_mcp` каждые 200 мс кладёт сюда
     /// `Cfg::load(kit)` без `ops_host::settle_chosen_ports` (его там и не
@@ -60,9 +61,7 @@ impl Live {
     /// дёргала рестарт ребёнка напрасно.
     pub fn set(&self, mut cfg: Cfg) {
         let mut g = self.0.lock().unwrap();
-        if cfg.resolved_http_port.is_none() {
-            cfg.resolved_http_port = g.1.resolved_http_port;
-        }
+        cfg.carry_session_facts(&g.1);
         if g.1 == cfg {
             return;
         }
@@ -947,6 +946,24 @@ mod tests {
         let after = live.get().1;
         assert_eq!(after.http_port(), 9100, "улаженный порт обязан пережить такт наблюдателя");
         assert_eq!(after.base_url(), "http://127.0.0.1:9100/hs/mcp-1c");
+    }
+
+    /// Сдвиг моста — такой же факт сеанса, и такт наблюдателя обязан щадить и
+    /// его: слушатель уже держит 7772, а `Serve` после стирания называл бы
+    /// 7771 — то есть агента отправляли бы не туда, где слушают. Тот же
+    /// дефект, что у порта публикации, второй дорогой.
+    #[test]
+    fn a_watcher_tick_does_not_erase_the_bridge_shift_of_this_account() {
+        let mut settled = crate::cfg::filled_for_test();
+        settled.resolved_bridge_shift = Some(1);
+        let live = Live::new(settled);
+        assert_eq!(live.get().1.ports().mcp, 7772);
+
+        let reloaded = crate::cfg::filled_for_test();
+        assert_eq!(reloaded.resolved_bridge_shift, None, "голый `Cfg::load` сдвига не знает");
+        live.set(reloaded);
+
+        assert_eq!(live.get().1.ports().mcp, 7772, "сдвиг обязан пережить такт наблюдателя");
     }
 
     /// Главная опасность 6B: вызов, получивший строку подключения одной базы

@@ -365,12 +365,32 @@ ZEDDB
             # the stand no longer publishes workstation bases itself (see
             # `start`). base_url matches what Cfg::base_url() computes for
             # that publication: the root of its own port, no "/base" segment.
+            #
+            # **Форма файла — список соединений, и это не вкус.** Прежнюю
+            # секцию `[host]` коннектор ОТКАЗЫВАЕТ словами, до всякой другой
+            # проверки (решение владельца 4.11, `cfg::TryFrom<CfgFile>`:
+            # установок нигде нет, совместимость не нужна). Стенд писал её до
+            # 25.11 — и коннектор не поднимался НИ У ОДНОЙ учётной записи:
+            # «файл старой формы». Нашлось живым прогоном трёх `serve` в
+            # контейнере, набор этого не видел.
+            #
+            # Полей `gitea` и `workstation` здесь больше нет: разбор их
+            # принимает, но выбрасывает (`cfg::Connection::gone_*`) и выписывает
+            # человеку записку «поле больше не действует». Адрес Gitea
+            # коннектор берёт из `origin` проекта — его и правит блок ниже.
+            #
+            # `write = "read_write"`: у стенда в наборе инструментов есть
+            # `cf_load` и `infobase_update`, то есть vrunner там ПИШЕТ. Потолок
+            # «только чтение» запрещал бы ровно то, за чем на стенд приходят.
             cat >"$t/$CONNECT_TOML" <<EOF
-[host]
+current = "$u"
+write = "read_write"
+
+[[connection]]
+name = "$u"
 mode = "local"
-gitea = "$GITEA_URL"
-workstation = "$u"
 base_path = "$HOME/base"
+base_here = true
 base_url = "http://localhost:$((8080 + n))/hs/mcp-1c"
 publication = "auto"
 project = "$HOME/project"
@@ -465,32 +485,6 @@ EOF
             sed -i "s|^db_user = \"\"|db_user = \"$DB_USER\"|" "$t/$CONNECT_TOML"
             log "1c-connect: пустой db_user в $CONNECT_TOML заменён на $DB_USER" >&2
         fi
-        # The address of the image's Gitea goes into an ALREADY EXISTING toml
-        # too, not only into a new one: a home is a volume, the file is
-        # normally already there, and otherwise the address would never
-        # appear — the connector would keep deriving it from the SSH port and
-        # the check would stay yellow forever. Idempotent and blind to the
-        # other lines; appended at the end of the file, where [host] is the
-        # only table (both the connector's own render and the heredoc above
-        # write just that one). The leading newline guards against a last
-        # line with no newline of its own.
-        have=$(sed -n 's|^[[:space:]]*gitea[[:space:]]*=[[:space:]]*"\(.*\)"|\1|p' "$t/$CONNECT_TOML" | tail -1)
-        case "$have" in
-        "")
-            { echo; echo "gitea = \"$GITEA_URL\""; } >>"$t/$CONNECT_TOML"
-            log "1c-connect: адрес Gitea ($GITEA_URL) дописан в $t/$CONNECT_TOML" >&2
-            ;;
-        "$GITEA_URL") ;;
-        http://localhost:*|http://127.0.0.1:*|"http://[::1]:"*)
-            # Written by an older image under a different port: ours to move.
-            # A real hostname is the person's own choice and stays untouched,
-            # the same rule as for the project's origin below.
-            grep -v '^[[:space:]]*gitea[[:space:]]*=' "$t/$CONNECT_TOML" >"$t/$CONNECT_TOML.new"
-            echo "gitea = \"$GITEA_URL\"" >>"$t/$CONNECT_TOML.new"
-            mv "$t/$CONNECT_TOML.new" "$t/$CONNECT_TOML"
-            log "1c-connect: адрес Gitea обновлён на $GITEA_URL в $t/$CONNECT_TOML" >&2
-            ;;
-        esac
         # A project laid out before the address moved keeps the old `origin`,
         # which the connector then reports as drift (project::layout_state)
         # and nothing here would ever fix: install is what repairs it on a

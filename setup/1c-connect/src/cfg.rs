@@ -3703,6 +3703,15 @@ EOF
         assert_eq!(cfg.write, WriteCeiling::ReadWrite, "на стенде vrunner пишет: cf_load и infobase_update в наборе по умолчанию");
         assert_eq!(cfg.current().base_path, "/home/dev1/base");
         assert!(cfg.current().base_here, "база стенда — в контейнере");
+        // Разбор — половина дела: файл обязан быть РАБОЧИМ, а не просто
+        // разбираемым. `validate` — та же проверка, что встречает его на
+        // запуске коннектора.
+        cfg.validate().unwrap_or_else(|e| {
+            panic!(
+                "стенд пишет негодный файл: {e}
+{filled}"
+            )
+        });
     }
 
     /// Сдвиг, доставшийся учётке, обязан ДОЕХАТЬ до тройки — иначе подбор

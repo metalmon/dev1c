@@ -35,6 +35,11 @@ const AUTOSTART_TEXT: &str = "Запускать при входе";
 /// на машине несколько; обоими правит карточка окна (`panel::answer_card`,
 /// `panel::answer_card`).
 pub struct Tray {
+    /// Доказательство поднятого GTK, с которым значок и был создан (`build`
+    /// берёт его параметром). Лежит здесь, чтобы `pump` могла достаться
+    /// только тому, у кого значок ЕСТЬ: прежде задача прокрутки запускалась
+    /// безусловно и роняла безоконный `serve` — см. докстроку `Gtk`.
+    gtk: Gtk,
     icon: TrayIcon,
     toggle: MenuItem,
     /// Потолок записи (корневой ключ `write`, `Cfg::access()`) — радио из
@@ -167,34 +172,52 @@ pub fn menu_action(id: &str) -> Option<MenuAction> {
 #[cfg(target_os = "linux")]
 pub const PUMP: std::time::Duration = std::time::Duration::from_millis(50);
 
+/// **Доказательство, что GTK поднят.** Завести его может только `init`, и
+/// `pump` живёт на нём — значит прокрутить цикл GTK, не подняв библиотеку,
+/// нечем. Пустой и `Copy`: места не занимает, передаётся куда угодно.
+///
+/// Зачем тип, а не дисциплина (живой прогон 25.11, стенд на home-gpu).
+/// Вопрос «поднят ли GTK» имел ДВА ответа: отказ `init`, который вызывающий
+/// переживал словами («Значка в трее нет…», закон 5 спеки), и `pump`, которая
+/// считала его поднятым всегда. Задача прокрутки запускалась безусловно — и
+/// через 50 мс `gtk::events_pending()` роняла процесс паникой «GTK has not
+/// been initialized». Безоконный `serve` при этом УЖЕ напечатал человеку
+/// «Доступ к 1С включён: порты 7771 и 7781»: слова обещали работу, а процесс
+/// уходил. На стенде из-за этого не держалась ни одна учётная запись.
+#[derive(Clone, Copy)]
+pub struct Gtk(());
+
+impl Gtk {
+    /// Разобрать накопившиеся события GTK, не блокируя поток: через них
+    /// приходят щелчки по меню значка и ответы панели по DBus. Своего цикла у
+    /// нас нет — его роль играет этот зов из задачи в `launch`.
+    #[cfg(target_os = "linux")]
+    pub fn pump(self) {
+        while gtk::events_pending() {
+            gtk::main_iteration_do(false);
+        }
+    }
+
+    /// На остальных системах крутить нечего.
+    #[cfg(not(target_os = "linux"))]
+    pub fn pump(self) {}
+}
+
 /// На Linux значок рисует libappindicator, а это GTK-библиотека: без
 /// `gtk::init()` первый же пункт меню роняет процесс («GTK has not been
 /// initialized»). Зовётся до `build` и на том же потоке, где потом живёт
 /// значок, — поэтому `pump` и окно остаются на одном потоке, и пересылать
 /// между потоками нечего.
 #[cfg(target_os = "linux")]
-pub fn init() -> anyhow::Result<()> {
-    gtk::init().map_err(|e| anyhow::anyhow!("GTK не инициализирован: {e}"))
+pub fn init() -> anyhow::Result<Gtk> {
+    gtk::init().map(|()| Gtk(())).map_err(|e| anyhow::anyhow!("GTK не инициализирован: {e}"))
 }
 
-/// На остальных системах трею GTK не нужен.
+/// На остальных системах трею GTK не нужен — доказательство выдаётся сразу.
 #[cfg(not(target_os = "linux"))]
-pub fn init() -> anyhow::Result<()> {
-    Ok(())
+pub fn init() -> anyhow::Result<Gtk> {
+    Ok(Gtk(()))
 }
-
-/// Разобрать накопившиеся события GTK, не блокируя поток: через них
-/// приходят щелчки по меню значка и ответы панели по DBus. Своего цикла у
-/// нас нет — его роль играет эта функция из задачи в `launch`.
-#[cfg(target_os = "linux")]
-pub fn pump() {
-    while gtk::events_pending() {
-        gtk::main_iteration_do(false);
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-pub fn pump() {}
 
 /// Значок трея с бейджем состояния, байты RGBA — тестируемое ядро `icon`,
 /// не трогает Win32.
@@ -213,7 +236,7 @@ pub fn icon(state: TrayState) -> Icon {
 /// Построить значок трея с меню и подписаться на события ОС — обработчики
 /// шлют их в `tx`. Левый щелчок не открывает меню (оно только по правому).
 /// `autostart_on`/`autoconnect_on` — начальные галочки, читает `launch`.
-pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool, autoconnect_on: bool) -> anyhow::Result<Tray> {
+pub fn build(gtk: Gtk, tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool, autoconnect_on: bool) -> anyhow::Result<Tray> {
     #[cfg(target_os = "linux")]
     let open = MenuItem::with_id(OPEN, "Открыть окно", true, None);
     let toggle = MenuItem::with_id("toggle", crate::gui::toggle_label(false), true, None);
@@ -292,6 +315,7 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
     let access = [access_items[0].clone(), access_items[1].clone()];
     let agents = [agent_items[0].clone(), agent_items[1].clone(), agent_items[2].clone(), agent_items[3].clone()];
     Ok(Tray {
+        gtk,
         icon: tray,
         toggle,
         access,
@@ -307,6 +331,13 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
 }
 
 impl Tray {
+    /// Доказательство поднятого GTK — тому, кто крутит его цикл. Отдаётся
+    /// копией: тип пустой, а право на `pump` этим и ограничено — значок есть,
+    /// значит библиотека поднята.
+    pub fn gtk(&self) -> Gtk {
+        self.gtk
+    }
+
     /// Значок badge(state) и надпись переключателя (`gui::toggle_label` — предмет, а не причина отказа).
     /// Подсказку `set_state` не трогает: `TrayState` одно на троих (занят,
     /// подключён, нет связи) и само по себе не знает фазу операции — её

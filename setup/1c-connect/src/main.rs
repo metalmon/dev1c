@@ -687,7 +687,7 @@ fn connect(ctx: &Ctx) -> Result<()> {
     // `connect` был бы исключением, нет: обслуживает он ровно то же и ровно
     // тем же.
     if let Some(why) = gate::gate_now(&ctx.kit, &ctx.cfg) {
-        return Err(gate::refuse_to_serve(&ctx.kit, &why));
+        return Err(gate::refuse_to_serve(&why));
     }
     door.show(status_view(&card, &session::State::Off));
     // `connect` — такой же владелец сеанса, как окно (спека, «у сеанса один
@@ -800,7 +800,7 @@ fn serve(ctx: &Ctx) -> Result<()> {
     // которой не будет, не сказав ни слова. Слова и код возврата — общие
     // (`gate::refuse_to_serve`).
     if let Some(why) = gate::gate_now(&ctx.kit, &ctx.cfg) {
-        return Err(gate::refuse_to_serve(&ctx.kit, &why));
+        return Err(gate::refuse_to_serve(&why));
     }
     // На стенде связь держит именно `serve` (сам он и есть «окно» этого
     // рабочего места) — тот же признак разрешения, что пишет `connect`, см.

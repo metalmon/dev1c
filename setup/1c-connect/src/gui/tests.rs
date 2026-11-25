@@ -283,8 +283,15 @@ fn a_startup_refusal_reaches_the_journal_on_every_road() {
     assert!(SRC.contains("no_place_for_a_window(kit, why)"), "безоконная дорога на месте");
     // Долгоживущие подкоманды: их подъём до развилки окна не доходит вовсе.
     const MAIN: &str = include_str!("../main.rs");
-    let product = MAIN.split_once("mod tests {").map_or(MAIN, |(before, _)| before);
-    assert_eq!(product.matches("journal::record_stop(&ctx.kit").count(), 2, "`connect` и `serve` оба кладут отказ подъёма на диск");
+    let product = |src: &'static str| src.split_once("mod tests {").map_or(src, |(before, _)| before);
+    assert_eq!(product(MAIN).matches("journal::record_stop(&ctx.kit").count(), 2, "`connect` и `serve` оба кладут отказ подъёма на диск");
+    // **И пишущий на каждой дороге ОДИН.** Производители отказа слов на диск не кладут: писали двое, и на одно событие выходило
+    // две строки разного начертания (живой прогон 25.11 на Linux). Сторож прошлого круга этого не видел, потому что спрашивал
+    // «есть ли запись», а не «сколько»; число считает `journal::tests::one_startup_refusal_leaves_exactly_one_line`, а здесь — те,
+    // кому писать больше нельзя.
+    for (who, src) in [("gate.rs", include_str!("../gate.rs")), ("single_instance.rs", include_str!("../single_instance.rs"))] {
+        assert!(!product(src).contains("journal::write"), "{who} пишет отказ сам — у доносящего выйдет вторая строка");
+    }
 }
 
 /// Совет «работайте подкомандой» живёт у ТЕХ ДВУХ поводов, которым он верен, и больше ни у кого.

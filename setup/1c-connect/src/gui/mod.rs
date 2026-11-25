@@ -2551,7 +2551,7 @@ fn launched(kit: Kit, start: Start) -> anyhow::Result<()> {
     let serve_on_start = match serving_at_start(start, gate.as_deref(), autoconnect_on) {
         Ok(on) => on,
         // Слова — не свои, а общие с путём без окна (`gate::refuse_to_serve`): одна причина, одна формулировка, один журнал.
-        Err(why) => return Err(crate::gate::refuse_to_serve(&kit, why)),
+        Err(why) => return Err(crate::gate::refuse_to_serve(why)),
     };
     crate::bridge::set_off_reason(gate.clone());
     // Управляющая дверь — у ОБОИХ вариантов `Start`, и дело тут не в окне: дверь есть у всякого живого экземпляра, потому что
